@@ -248,18 +248,3 @@ D:\SciVault\
 ```
 
 ---
-
-## Итого: все фазы закрыты
-
-| Фаза | Результат |
-|---|---|
-| 0–1 | Инфраструктура: Zotero + LM Studio + ChromaDB |
-| 2 | PDF → Markdown → RAG → Ответ |
-| 3 | Фигуры + Obsidian-заметки + wiki-links |
-| 4 | Queue orchestration |
-| 5 | Промпты + CLI polish |
-| 6 | 4 реальные статьи в продакшне |
-| 7 | similar, gaps, draft, analyze |
-| 8 | Документация |
-
-**Добавляй статьи в Zotero Queue → `sciassist process --queue` → Obsidian + RAG обновляются.**
