@@ -1,6 +1,6 @@
-````markdown
 ## Полный список команд SciAssist CLI
 
+```
 # СИСТЕМА
 
 # Диагностика всей инфраструктуры
@@ -16,7 +16,7 @@ sciassist logs --tail 50
 
 # ОБРАБОТКА СТАТЕЙ
 
-# Одна статья — полный пайплайн (OCR → фигуры → индекс → заметка). В качестве примера используется статья Attention is all you need
+# Одна статья — полный пайплайн (OCR → фигуры → индекс → заметка)
 sciassist process vaswani2023attention
 
 # Только OCR → markdown (без заметки и индексации)
@@ -98,7 +98,6 @@ sciassist zotero status
 python scripts/reindex.py
 
 # Полная переиндексация с нуля (удали data/chroma_db/ и data/index_registry.json, затем)
-```
 sciassist process --queue --force
 ```
 
