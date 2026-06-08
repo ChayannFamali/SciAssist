@@ -10,6 +10,7 @@ Olmocr требует anchor text (текст из PDF слоя) — перед�
 """
 import asyncio
 import tempfile
+from collections import Counter                          # ← добавлено
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,18 +27,64 @@ from sciassist.utils.lm_studio_client import LMStudioClient
 # PyMuPDF extraction (primary for digital PDFs)
 # ---------------------------------------------------------------------------
 
-def _pymupdf_pages(pdf_path: Path) -> list[str]:
-    """Extract text per page using PyMuPDF. Returns list of page strings."""
-    doc = fitz.open(str(pdf_path))
-    pages: list[str] = []
+def _body_font_size(doc) -> float:
+    """Самый частый размер шрифта (по объёму текста) = тело документа."""
+    sizes: Counter = Counter()
     for page in doc:
-        try:
-            text = page.get_text("markdown")   # requires PyMuPDF ≥ 1.24
-        except Exception:
-            text = page.get_text("text")
-        pages.append(text)
-    doc.close()
-    return pages
+        for block in page.get_text("dict").get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    txt = span.get("text", "").strip()
+                    if txt:
+                        sizes[round(span["size"])] += len(txt)
+    return float(sizes.most_common(1)[0][0]) if sizes else 10.0
+
+
+def _line_to_md(text: str, max_size: float, is_bold: bool, body: float) -> str:
+    """Решить, заголовок строка или абзац, и вернуть markdown."""
+    words = text.split()
+    if len(words) <= 12 and max_size >= body + 1:
+        if max_size >= body + 4:
+            return f"\n# {text}\n"
+        if max_size >= body + 2:
+            return f"\n## {text}\n"
+        return f"\n### {text}\n"
+    if len(words) <= 8 and is_bold and text[:1].isupper():
+        return f"\n### {text}\n"
+    return text
+
+
+def _pymupdf_pages(pdf_path: Path) -> list[str]:
+    """Извлечь текст с разметкой заголовков по размеру шрифта."""
+    cfg = get_yaml_config().get("preprocessing", {})
+    detect = cfg.get("detect_headings", True)
+
+    doc = fitz.open(str(pdf_path))
+    try:
+        if not detect:                                  # старое поведение
+            return [p.get_text("text") for p in doc]
+
+        body = _body_font_size(doc)
+        pages: list[str] = []
+        for page in doc:
+            out: list[str] = []
+            for block in page.get_text("dict").get("blocks", []):
+                if block.get("type") != 0:              # пропустить картинки
+                    continue
+                for line in block.get("lines", []):
+                    spans = line.get("spans", [])
+                    text = "".join(s.get("text", "") for s in spans).strip()
+                    if not text:
+                        continue
+                    max_size = max((round(s["size"]) for s in spans), default=body)
+                    is_bold = any(s.get("flags", 0) & 16 for s in spans)  # bit4 = bold
+                    out.append(_line_to_md(text, max_size, is_bold, body))
+            pages.append("\n".join(out))
+        return pages
+    finally:
+        doc.close()
 
 
 def _is_scanned(pages: list[str], threshold: int) -> bool:
@@ -79,7 +126,6 @@ async def _olmocr_page(
     """
     image = await asyncio.to_thread(_render_page, pdf_path, page_num, dpi, tmp_dir)
 
-    # Olmocr expects anchor text in the prompt to guide OCR
     anchor_block = f"<page_content>\n{anchor_text}\n</page_content>\n\n" if anchor_text.strip() else ""
     prompt = (
         f"{anchor_block}"
@@ -158,7 +204,6 @@ async def process_pdf(
     out = cfg.raw_markdown_path / f"{citekey}.md"
     cfg.raw_markdown_path.mkdir(parents=True, exist_ok=True)
 
-    # Validate PDF
     try:
         doc = fitz.open(str(pdf_path))
         if doc.is_encrypted:
@@ -172,10 +217,8 @@ async def process_pdf(
 
     logger.info(f"{citekey}: обработка PDF ({n_pages} стр.) — {pdf_path.name}")
 
-    # Always extract text layer first (needed as anchor for Olmocr too)
     anchor_pages = await asyncio.to_thread(_pymupdf_pages, pdf_path)
 
-    # Decide mode
     mode = prep.get("ocr_mode", "auto")
     threshold = prep.get("scanned_threshold_chars_per_page", 100)
 

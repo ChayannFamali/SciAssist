@@ -13,6 +13,7 @@ class ModelSpec:
     max_context: int
     temperature: float
     timeout: int
+    max_tokens: int = 4096
 
 
 class ModelRouter:
@@ -33,14 +34,15 @@ class ModelRouter:
         max_ctx = rule.get("max_context", 8000)
         temp = rule.get("temperature", 0.3)
         timeout = rule.get("timeout", 120)
+        max_tokens = rule.get("max_tokens", 4096)      # ← новое
         primary = rule["primary"]
 
-        # Use fallback if context_size exceeds primary limit
         if context_size > max_ctx:
             for fb in rule.get("fallback", []):
-                return ModelSpec(name=fb, max_context=max_ctx, temperature=temp, timeout=timeout)
-
-        return ModelSpec(name=primary, max_context=max_ctx, temperature=temp, timeout=timeout)
+                return ModelSpec(name=fb, max_context=max_ctx, temperature=temp,
+                                 timeout=timeout, max_tokens=max_tokens)
+        return ModelSpec(name=primary, max_context=max_ctx, temperature=temp,
+                         timeout=timeout, max_tokens=max_tokens)
 
     def embed_model(self) -> str:
         return self._rules.get("embed", {}).get("primary", "text-embedding-bge-m3")

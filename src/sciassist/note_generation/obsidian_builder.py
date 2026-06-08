@@ -34,12 +34,32 @@ def _make_messages(prompt_text: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _salvage_truncated_json(text: str) -> dict:
+    """Best-effort ремонт обрезанного JSON (LLM упёрся в max_tokens)."""
+    start = text.find("{")
+    if start == -1:
+        return {}
+    s = text[start:]
+    for cut in range(len(s), 0, -1):
+        frag = s[:cut].rstrip().rstrip(",")
+        if frag.count('"') % 2 != 0:      # обрыв внутри строки — пропускаем
+            continue
+        opens_sq = frag.count("[") - frag.count("]")
+        opens_cu = frag.count("{") - frag.count("}")
+        candidate = frag + "]" * max(0, opens_sq) + "}" * max(0, opens_cu)
+        try:
+            return json.loads(candidate)
+        except Exception:
+            continue
+    return {}
+
 
 def _parse_json(text: str) -> dict:
     """Robustly extract JSON from LLM response."""
     if not text.strip():
         logger.warning("LLM вернул пустой ответ (thinking mode? контекст?)")
         return {}
+
     for pattern in (r"```(?:json)?\s*(\{.*?\})\s*```", r"(\{.*\})"):
         m = re.search(pattern, text, re.DOTALL)
         if m:
@@ -47,8 +67,14 @@ def _parse_json(text: str) -> dict:
                 return json.loads(m.group(1))
             except Exception:
                 pass
+    salvaged = _salvage_truncated_json(text)
+    if salvaged:
+        logger.info(f"JSON восстановлен из обрезанного ответа ({len(salvaged)} ключей)")
+        return salvaged
+
     logger.warning(f"JSON не найден в ответе. Первые 300 симв.: {text[:300]!r}")
     return {}
+
 
 
 def _truncate(text: str, max_words: int, reserve: int = 0) -> str:
@@ -154,7 +180,7 @@ async def build_note(citekey: str, item: ZoteroItem, force: bool = False) -> Pat
             _load_prompt("summary"),
             paper_text=_truncate(full_text, _NOTE_MAX_WORDS),
         )),
-        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,
+        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,max_tokens=spec.max_tokens,
     )
     summary = _parse_json(raw)
 
@@ -166,7 +192,7 @@ async def build_note(citekey: str, item: ZoteroItem, force: bool = False) -> Pat
             _load_prompt("extract_structure"),
             paper_text=_truncate(full_text, _NOTE_MAX_WORDS),
         )),
-        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,
+        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,max_tokens=spec.max_tokens,
     )
     structure = _parse_json(raw)
 
@@ -178,7 +204,7 @@ async def build_note(citekey: str, item: ZoteroItem, force: bool = False) -> Pat
             _load_prompt("entity_extraction"),
             paper_text=_truncate(full_text, _NOTE_MAX_WORDS),
         )),
-        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,
+        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,max_tokens=spec.max_tokens,
     )
     entities = _parse_json(raw)
 
@@ -190,7 +216,7 @@ async def build_note(citekey: str, item: ZoteroItem, force: bool = False) -> Pat
             _load_prompt("critique"),
             paper_text=_truncate(full_text, _NOTE_MAX_WORDS),
         )),
-        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,
+        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,max_tokens=spec.max_tokens,
     )
     critique = _parse_json(raw)
 

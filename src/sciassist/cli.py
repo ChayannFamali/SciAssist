@@ -177,9 +177,11 @@ async def _search(query: str, top: int, col: str) -> None:
 
     t = Table("#", "Citekey", "Section", "Score", "Preview", show_lines=True, expand=True)
     for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists)):
-        score = f"{1 - float(dist):.3f}"
+        score = 1 - float(dist)
         preview = doc[:100].replace("\n", " ") + "…"
-        t.add_row(str(i + 1), meta.get("citekey", "?"), meta.get("section", "?"), score, preview)
+        # подсветка: что прошло бы порог 0.4
+        score_str = f"[green]{score:.3f}[/green]" if score >= 0.4 else f"[dim]{score:.3f}[/dim]"
+        t.add_row(str(i + 1), meta.get("citekey", "?"), meta.get("section", "?"), score_str, preview)
     console.print(t)
 
 
@@ -190,29 +192,47 @@ async def _search(query: str, top: int, col: str) -> None:
 def ask(
     question: Annotated[str, typer.Argument(help="Question for RAG")],
     top: Annotated[int, typer.Option("--top", "-k")] = 5,
+    min_score: Annotated[float, typer.Option("--min-score", "-s")] = 0.4,
+    max_per_paper: Annotated[int, typer.Option("--max-per-paper", "-m")] = 3,
+    rerank: Annotated[bool, typer.Option("--rerank/--no-rerank")] = True,
+    hybrid: Annotated[bool, typer.Option("--hybrid/--no-hybrid")] = True,
+    col: Annotated[str, typer.Option("--col", "-c",
+        help="papers_full | papers_notes | both")] = "papers_full",
+    hyde: Annotated[bool, typer.Option("--hyde/--no-hyde",   # ← добавлено
+        help="HyDE: генерировать гипотетический ответ для эмбеддинга")] = False,
 ) -> None:
     """Ask a question — RAG answer with citations."""
-    asyncio.run(_ask(question, top))
+    asyncio.run(_ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde))  # ← добавлен hyde
 
 
-async def _ask(question: str, top: int) -> None:
+async def _ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde) -> None:  # ← добавлен hyde
     from sciassist.utils.logging import setup_logging
     from sciassist.rag.query_engine import QueryEngine
     setup_logging()
 
-    console.print(f"[dim]Embedding + retrieve (top={top})…[/dim]")
+    console.print(
+        f"[dim]retrieve (top={top}, min={min_score}, max/paper={max_per_paper}, "
+        f"rerank={'on' if rerank else 'off'}, hybrid={'on' if hybrid else 'off'}, "
+        f"col={col}, hyde={'on' if hyde else 'off'})…[/dim]"  # ← добавлен hyde
+    )
     engine = QueryEngine()
-    result = await engine.ask(question, top_k=top)
-
+    result = await engine.ask(
+        question, top_k=top, min_score=min_score,
+        max_per_paper=max_per_paper, rerank=rerank, hybrid=hybrid,
+        collection=col, hyde=hyde,                             # ← добавлен hyde
+    )
     console.print()
     console.print(Panel(result.answer, title="[bold cyan]Ответ[/bold cyan]"))
 
     t = Table("Citekey", "Section", "Score", title="Источники")
     for s in result.sources:
-        t.add_row(s.citekey, s.section, str(s.score))
+        section_label = s.section
+        if col == "both":
+            tag = "[note]" if "note" in s.section.lower() else "[full]"
+            section_label = f"{tag} {s.section}"
+        t.add_row(s.citekey, section_label, str(s.score))
     console.print(t)
     console.print(f"[dim]Модель: {result.model}[/dim]")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # stats

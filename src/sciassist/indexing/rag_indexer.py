@@ -1,6 +1,7 @@
 """ChromaDB indexer — papers_full and papers_notes collections."""
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import chromadb
@@ -14,6 +15,33 @@ from sciassist.utils.lm_studio_client import LMStudioClient
 # Cosine distance: values in [0, 2], lower = more similar
 # similarity = 1 - distance gives [-1, 1], typically [0, 1] for relevant docs
 _COSINE = {"hnsw:space": "cosine"}
+
+# спецтокены токенизатора/OCR
+import re
+
+_NOISE_RE = re.compile(r"<\s*/?\s*(?:EOS|BOS|PAD|UNK|s|pad|unk|mask)\s*>", re.IGNORECASE)
+# YAML-frontmatter в начале: ---\n...\n---
+_FRONTMATTER_RE = re.compile(r"^\s*---\s*\n.*?\n---\s*\n", re.DOTALL)
+
+
+def _clean_chunk(text: str) -> str:
+    """Вырезать frontmatter и спецтокены, схлопнуть пробелы."""
+    text = _FRONTMATTER_RE.sub("", text)      # убрать YAML-блок, СОХРАНИВ контент
+    text = _NOISE_RE.sub(" ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _is_junk(text: str) -> bool:
+    """Отбросить только реально пустые/мусорные чанки (без startswith-фильтра!)."""
+    if len(text) < 40:
+        return True
+    alnum = sum(c.isalnum() for c in text)
+    if alnum < 25:                            # почти нет букв/цифр → шум
+        return True
+    return False
+
 
 
 class RAGIndexer:
@@ -76,23 +104,37 @@ class RAGIndexer:
             logger.warning(f"{citekey}: нет чанков")
             return 0
 
-        texts = [c.text for c in chunks]
+        # Чистка + отсев мусорных чанков (выравниваем ids/metadatas)
+        clean_chunks: list[tuple[str, object]] = []
+        for c in chunks:
+            cleaned = _clean_chunk(c.text)
+            if _is_junk(cleaned):
+                continue
+            clean_chunks.append((cleaned, c))
+
+        if not clean_chunks:
+            logger.warning(f"{citekey}: после чистки не осталось чанков")
+            return 0
+
+        texts = [t for t, _ in clean_chunks]
         embeddings = await self._embed(texts)
 
         self._papers.add(
-            ids=[f"{citekey}::p::{i}" for i in range(len(chunks))],
+            ids=[f"{citekey}::p::{i}" for i in range(len(clean_chunks))],
             documents=texts,
             embeddings=embeddings,
             metadatas=[
                 {"citekey": citekey, "section": c.section, "idx": c.chunk_index}
-                for c in chunks
+                for _, c in clean_chunks
             ],
         )
-
+        logger.info(
+            f"{citekey}: papers_full ← {len(clean_chunks)} чанков "
+            f"(отброшено {len(chunks) - len(clean_chunks)})"
+        )
         self._reg[reg_key] = md5
         self._save()
-        logger.info(f"{citekey}: papers_full ← {len(chunks)} чанков")
-        return len(chunks)
+        return len(clean_chunks)
 
     async def index_note(self, citekey: str, note_path: Path, *, force: bool = False) -> int:
         reg_key = f"note:{citekey}"
@@ -115,20 +157,37 @@ class RAGIndexer:
         if not chunks:
             return 0
 
-        texts = [c.text for c in chunks]
+        # Чистка + отсев мусорных чанков (фронтматтер заметок тоже отфильтруется)
+        clean_chunks: list[tuple[str, object]] = []
+        for c in chunks:
+            cleaned = _clean_chunk(c.text)
+            if _is_junk(cleaned):
+                continue
+            clean_chunks.append((cleaned, c))
+
+        if not clean_chunks:
+            logger.warning(f"{citekey}: после чистки не осталось чанков (notes)")
+            return 0
+
+        texts = [t for t, _ in clean_chunks]
         embeddings = await self._embed(texts)
 
         self._notes.add(
-            ids=[f"{citekey}::n::{i}" for i in range(len(chunks))],
+            ids=[f"{citekey}::n::{i}" for i in range(len(clean_chunks))],
             documents=texts,
             embeddings=embeddings,
-            metadatas=[{"citekey": citekey, "section": c.section} for c in chunks],
+            metadatas=[
+                {"citekey": citekey, "section": c.section}
+                for _, c in clean_chunks
+            ],
         )
-
+        logger.info(
+            f"{citekey}: papers_notes ← {len(clean_chunks)} чанков "
+            f"(отброшено {len(chunks) - len(clean_chunks)})"
+        )
         self._reg[reg_key] = md5
         self._save()
-        logger.info(f"{citekey}: papers_notes ← {len(chunks)} чанков")
-        return len(chunks)
+        return len(clean_chunks)
 
     async def query(
         self,
@@ -162,3 +221,6 @@ class RAGIndexer:
             "indexed_papers": len([k for k in self._reg if k.startswith("paper:")]),
             "embed_model": self._embed_model,
         }
+    def get_collection(self, name: str):
+        """Вернуть Chroma-коллекцию по имени (для BM25)."""
+        return self._papers if name == "papers_full" else self._notes

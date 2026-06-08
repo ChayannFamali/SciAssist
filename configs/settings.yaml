@@ -9,6 +9,7 @@ zotero:
 preprocessing:
   ocr_pages_parallel: 1          # Olmocr: только последовательно
   min_text_length_warn: 500
+  detect_headings: true
   page_dpi: 150
   # auto = PyMuPDF если есть текст, olmocr если скан
   # pymupdf = всегда прямое извлечение (быстро, для цифровых PDF)
