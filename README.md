@@ -246,5 +246,3 @@ D:\SciVault\
 
 **Медленная генерация** — уменьши `_NOTE_MAX_WORDS` в `obsidian_builder.py` (текущее: 5000).
 ```
-
----
