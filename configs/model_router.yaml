@@ -1,0 +1,55 @@
+# ⚠️ Проверь точные имена через: GET http://localhost:1234/v1/models
+# Имена должны совпадать с тем, что возвращает LM Studio API
+
+# Имена проверены по GET http://localhost:1234/v1/models
+
+rules:
+  deep_analysis:
+    primary: "qwen/qwen3.6-35b-a3b"
+    fallback: ["mistralai/magistral-small-2509", "qwen/qwen3.5-9b"]
+    max_context: 32000
+    temperature: 0.3
+    timeout: 600
+
+  reasoning:
+    primary: "mistralai/magistral-small-2509"
+    fallback: ["qwen/qwen3.6-35b-a3b"]
+    max_context: 16000
+    temperature: 0.4
+    timeout: 600
+
+  summary:
+    primary: "qwen/qwen3.5-9b"
+    fallback: ["mistralai/magistral-small-2509"]
+    max_context: 16000
+    temperature: 0.5
+    timeout: 600
+
+  chat:
+    primary: "qwen/qwen3.5-9b"
+    max_context: 16000
+    temperature: 0.6
+    timeout: 600
+
+  entity_extraction:
+    primary: "qwen/qwen3.5-9b"
+    fallback: ["mistralai/magistral-small-2509"]
+    max_context: 8000
+    temperature: 0.2
+    timeout: 600
+
+  vision:
+    primary: "qwen/qwen3-vl-8b"
+    max_context: 4096
+    temperature: 0.3
+    timeout: 600
+
+  ocr:
+    primary: "allenai/olmocr-2-7b"
+    max_context: 8000
+    temperature: 0.1
+    timeout: 600
+
+  embed:
+    primary: "text-embedding-bge-m3"  # было: bge-m3
+    max_batch: 32

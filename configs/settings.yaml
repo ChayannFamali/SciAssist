@@ -1,0 +1,34 @@
+zotero:
+  queue_collection: "SciAssist Queue"
+  processed_collection: "SciAssist Processed"
+  processed_tag: "processed"
+  skip_tag: "skip_sciassist"
+  priority_tag: "priority_high"
+  backend_priority: ["http", "sqlite"]
+
+preprocessing:
+  ocr_pages_parallel: 1          # Olmocr: только последовательно
+  min_text_length_warn: 500
+  page_dpi: 150
+  # auto = PyMuPDF если есть текст, olmocr если скан
+  # pymupdf = всегда прямое извлечение (быстро, для цифровых PDF)
+  # olmocr  = всегда через модель (медленно, для сканов)
+  ocr_mode: "auto"
+  scanned_threshold_chars_per_page: 100   # меньше → считаем сканом
+
+chunking:
+  papers_full:
+    chunk_size: 1200
+    chunk_overlap: 200
+  papers_notes:
+    chunk_size: 800
+    chunk_overlap: 100
+
+rag:
+  embedding_model: "text-embedding-bge-m3"
+  default_top_k: 5
+  priority_boost: 0.15
+  archive_penalty: -0.10
+
+vision:
+  min_figure_size_px: 200
