@@ -1,5 +1,7 @@
+````markdown
 ## Полный список команд SciAssist CLI
 
+```powershell
 # СИСТЕМА
 
 # Диагностика всей инфраструктуры
@@ -96,8 +98,7 @@ sciassist zotero status
 # Инкрементальная переиндексация (только изменённые файлы)
 python scripts/reindex.py
 
-# Полная переиндексация с нуля
-# (удали data/chroma_db/ и data/index_registry.json, затем)
+# Полная переиндексация с нуля (удали data/chroma_db/ и data/index_registry.json, затем)
 sciassist process --queue --force
 ```
 
@@ -106,7 +107,7 @@ sciassist process --queue --force
 ## Параметры команд
 
 | Команда | Параметр | Значения | По умолчанию |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `process` | `--only` | `markdown`, `full` | `full` |
 | `process` | `--force` | флаг | `false` |
 | `search` | `--top` / `-k` | число | `5` |
@@ -119,3 +120,4 @@ sciassist process --queue --force
 | `zotero list` | `--collection` / `-c` | название коллекции | `SciAssist Queue` |
 | `zotero list` | `--check-pdf` | флаг | `false` |
 | `logs` | `--tail` / `-n` | число | `20` |
+````
