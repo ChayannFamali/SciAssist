@@ -245,4 +245,3 @@ D:\SciVault\
 **`501 Not Implemented`** — Zotero local API не поддерживает запись. Игнорируй, обработка прошла успешно.
 
 **Медленная генерация** — уменьши `_NOTE_MAX_WORDS` в `obsidian_builder.py` (текущее: 5000).
-```
