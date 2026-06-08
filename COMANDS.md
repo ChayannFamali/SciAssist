@@ -1,8 +1,6 @@
 ## Полный список команд SciAssist CLI
 
-# ════════════════════════════════════════
 # СИСТЕМА
-# ════════════════════════════════════════
 
 # Диагностика всей инфраструктуры
 sciassist health
@@ -15,9 +13,7 @@ sciassist logs --tail 20
 sciassist logs --tail 50
 
 
-# ════════════════════════════════════════
 # ОБРАБОТКА СТАТЕЙ
-# ════════════════════════════════════════
 
 # Одна статья — полный пайплайн (OCR → фигуры → индекс → заметка). В качестве примера используется статья Attention is all you need
 sciassist process vaswani2023attention
@@ -35,9 +31,7 @@ sciassist process --queue
 sciassist process --queue --force
 
 
-# ════════════════════════════════════════
 # ЗАМЕТКИ OBSIDIAN
-# ════════════════════════════════════════
 
 # Создать/обновить заметку (если нет или устарела)
 sciassist note vaswani2023attention
@@ -46,9 +40,7 @@ sciassist note vaswani2023attention
 sciassist note vaswani2023attention --force
 
 
-# ════════════════════════════════════════
 # ПОИСК И ВОПРОСЫ
-# ════════════════════════════════════════
 
 # Семантический поиск — сырые чанки без LLM
 sciassist search "attention mechanism"
@@ -66,9 +58,7 @@ sciassist similar vaswani2023attention --top 10
 sciassist similar chen2026memdreamer --top 5
 
 
-# ════════════════════════════════════════
 # АНАЛИЗ И НАПИСАНИЕ
-# ════════════════════════════════════════
 
 # Глубокий критический анализ статьи
 sciassist analyze vaswani2023attention --mode critique
@@ -84,9 +74,7 @@ sciassist draft related-work "transformer architecture" --papers 10
 sciassist draft related-work "opinion dynamics simulation" --papers 6
 
 
-# ════════════════════════════════════════
 # ZOTERO
-# ════════════════════════════════════════
 
 # Список статей в коллекции (по умолчанию SciAssist Queue)
 sciassist zotero list
@@ -103,9 +91,7 @@ sciassist zotero setup
 sciassist zotero status
 
 
-# ════════════════════════════════════════
 # ИНДЕКС
-# ════════════════════════════════════════
 
 # Инкрементальная переиндексация (только изменённые файлы)
 python scripts/reindex.py

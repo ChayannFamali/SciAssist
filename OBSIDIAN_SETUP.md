@@ -127,4 +127,3 @@ tags: [paper, transformer, manual_notes]
 4. Model: `qwen/qwen3.5-9b` (или любой загруженный)
 
 Теперь можно чатиться с LLM прямо внутри Obsidian, используя контекст открытой заметки.
-```
