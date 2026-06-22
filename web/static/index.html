@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SciAssist Web</title>
+    <link rel="stylesheet" href="/style.css?v=4">
+</head>
+<body>
+    <!-- Top bar: logo + health + search -->
+    <header id="topbar">
+        <div class="brand">📚 <strong>SciAssist</strong> <span class="dim">Web</span></div>
+        <div id="health" class="health">
+            <span class="h-item" data-key="lm_studio" title="LM Studio">🧠 LM <i>…</i></span>
+            <span class="h-item" data-key="zotero" title="Zotero">📖 Zot <i>…</i></span>
+            <span class="h-item" data-key="chroma" title="ChromaDB">🗄 Chroma <i>…</i></span>
+        </div>
+        <input id="search-box" type="search" placeholder="Поиск (Enter → Search tab)" autocomplete="off">
+    </header>
+
+    <!-- Tabs -->
+    <nav id="tabs">
+        <button class="tab active" data-tab="ask">💬 Ask</button>
+        <button class="tab" data-tab="search">🔍 Search</button>
+        <button class="tab" data-tab="graph">🕸 Graph</button>
+        <button class="tab" data-tab="library">📚 Library</button>
+        <button class="tab" data-tab="process">⚙️ Process</button>
+        <button class="tab" data-tab="logs">📊 Logs</button>
+    </nav>
+
+    <!-- Main: tab content + side panel -->
+    <main id="main">
+        <section id="content"></section>
+        <aside id="notes-panel" hidden></aside>
+    </main>
+
+    <!-- Vendored libs (offline) -->
+    <script src="/vendor/cytoscape.min.js?v=4"></script>
+    <script src="/vendor/markdown-it.min.js?v=4"></script>
+    <script src="/app.js?v=5"></script>
+</body>
+</html>

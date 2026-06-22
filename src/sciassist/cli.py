@@ -44,77 +44,36 @@ def process(
         raise typer.Exit(1)
 
 
+async def _step_print(msg: str) -> None:
+    """Callback для services.py — печатает шаг."""
+    console.print(f"[cyan]→ {msg}[/cyan]")
+
+
 async def _process(citekey: str, only: str, force: bool) -> None:
     from sciassist.utils.logging import setup_logging
-    from sciassist.utils.zotero_client import ZoteroClient
-    from sciassist.preprocessing.pdf_to_markdown import process_pdf
+    from sciassist.web.services import process_paper
     setup_logging()
 
-    zot = ZoteroClient()
     console.print(f"[cyan]Ищу '{citekey}' в Zotero…[/cyan]")
-
-    item = zot.find_by_citekey(citekey)
-    if item is None:
-        console.print(f"[red]❌ Статья '{citekey}' не найдена в Zotero[/red]")
+    res = await process_paper(citekey, only=only, force=force, on_step=_step_print)
+    if not res["ok"]:
+        console.print(f"[red]❌ {res['error']}[/red]")
         raise typer.Exit(1)
 
-    pdf = zot.get_pdf_path(item.key)
-    if pdf is None:
-        console.print(f"[red]❌ PDF не найден для {citekey}[/red]")
-        raise typer.Exit(1)
-
-    console.print(Panel(
-        f"[bold]{item.title}[/bold]\n"
-        f"[dim]{', '.join(str(a) for a in item.authors[:3])} ({item.year})[/dim]\n"
-        f"PDF: {pdf}",
-        title=citekey,
-    ))
-
-    meta = {
-        "title": item.title,
-        "year": item.year,
-        "doi": item.doi,
-        "authors": [{"first": a.first, "last": a.last} for a in item.authors],
-    }
-
-    # Step 1: OCR
-    console.print("[cyan]→ OCR (Olmocr)…[/cyan]")
-    md_path = await process_pdf(pdf, citekey, meta)
-    console.print(f"[green]✓ Markdown:[/green] {md_path}")
-
-    if only == "markdown":
-        return
-
-    # Step 2: Figures
-    console.print("[cyan]→ Извлечение фигур (VLM)…[/cyan]")
-    from sciassist.vision.figure_extractor import extract_figures
-    figs_path = await extract_figures(pdf, citekey)
-    n_figs = len(json.loads(figs_path.read_text()))
-    console.print(f"[green]✓ {n_figs} фигур[/green]")
-
-    # Step 3: Index paper
-    console.print("[cyan]→ Индексация (ChromaDB)…[/cyan]")
-    from sciassist.indexing.rag_indexer import RAGIndexer
-    indexer = RAGIndexer()
-    n = await indexer.index_paper(citekey, md_path, force=force)
-    console.print(f"[green]✓ {n} чанков → papers_full[/green]")
-
-    # Step 4: Obsidian note
-    console.print("[cyan]→ Генерация заметки Obsidian… (4 LLM-вызова ~2 мин)[/cyan]")
-    from sciassist.note_generation.obsidian_builder import build_note
-    note_path = await build_note(citekey, item, force=force)
-    console.print(f"[green]✓ Заметка:[/green] {note_path}")
-
-    # Step 5: Index note
-    n = await indexer.index_note(citekey, note_path, force=force)
-    console.print(f"[green]✓ {n} чанков → papers_notes[/green]")
+    d = res["data"]
+    console.print(f"[green]✓ Markdown:[/green] {d['md']}")
+    if only != "markdown":
+        console.print(f"[green]✓ {d.get('figures', 0)} фигур[/green]")
+        console.print(f"[green]✓ {d.get('chunks_full', 0)} чанков → papers_full[/green]")
+        console.print(f"[green]✓ Заметка:[/green] {d['note']}")
+        console.print(f"[green]✓ {d.get('chunks_notes', 0)} чанков → papers_notes[/green]")
 
 
 async def _process_queue(force: bool) -> None:
     from sciassist.utils.logging import setup_logging
-    from sciassist.pipeline.orchestrator import process_queue
+    from sciassist.web.services import process_queue as _pq
     setup_logging()
-    await process_queue(force=force)
+    await _pq(force=force, on_step=_step_print)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,7 +138,6 @@ async def _search(query: str, top: int, col: str) -> None:
     for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists)):
         score = 1 - float(dist)
         preview = doc[:100].replace("\n", " ") + "…"
-        # подсветка: что прошло бы порог 0.4
         score_str = f"[green]{score:.3f}[/green]" if score >= 0.4 else f"[dim]{score:.3f}[/dim]"
         t.add_row(str(i + 1), meta.get("citekey", "?"), meta.get("section", "?"), score_str, preview)
     console.print(t)
@@ -198,14 +156,14 @@ def ask(
     hybrid: Annotated[bool, typer.Option("--hybrid/--no-hybrid")] = True,
     col: Annotated[str, typer.Option("--col", "-c",
         help="papers_full | papers_notes | both")] = "papers_full",
-    hyde: Annotated[bool, typer.Option("--hyde/--no-hyde",   # ← добавлено
+    hyde: Annotated[bool, typer.Option("--hyde/--no-hyde",
         help="HyDE: генерировать гипотетический ответ для эмбеддинга")] = False,
 ) -> None:
     """Ask a question — RAG answer with citations."""
-    asyncio.run(_ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde))  # ← добавлен hyde
+    asyncio.run(_ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde))
 
 
-async def _ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde) -> None:  # ← добавлен hyde
+async def _ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde) -> None:
     from sciassist.utils.logging import setup_logging
     from sciassist.rag.query_engine import QueryEngine
     setup_logging()
@@ -213,13 +171,13 @@ async def _ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyd
     console.print(
         f"[dim]retrieve (top={top}, min={min_score}, max/paper={max_per_paper}, "
         f"rerank={'on' if rerank else 'off'}, hybrid={'on' if hybrid else 'off'}, "
-        f"col={col}, hyde={'on' if hyde else 'off'})…[/dim]"  # ← добавлен hyde
+        f"col={col}, hyde={'on' if hyde else 'off'})…[/dim]"
     )
     engine = QueryEngine()
     result = await engine.ask(
         question, top_k=top, min_score=min_score,
         max_per_paper=max_per_paper, rerank=rerank, hybrid=hybrid,
-        collection=col, hyde=hyde,                             # ← добавлен hyde
+        collection=col, hyde=hyde,
     )
     console.print()
     console.print(Panel(result.answer, title="[bold cyan]Ответ[/bold cyan]"))
@@ -233,6 +191,7 @@ async def _ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyd
         t.add_row(s.citekey, section_label, str(s.score))
     console.print(t)
     console.print(f"[dim]Модель: {result.model}[/dim]")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # stats
@@ -265,7 +224,7 @@ def logs(tail: Annotated[int, typer.Option("--tail", "-n")] = 20) -> None:
         try:
             r = json.loads(line)
             t.add_row(
-                r.get("ts", "")[-8:-5],  # just HH:MM
+                r.get("ts", "")[-8:-5],
                 r.get("model", "?")[:30],
                 r.get("task", "?"),
                 str(r.get("prompt_tokens", "")),
@@ -300,7 +259,6 @@ async def _similar(citekey: str, top: int) -> None:
         console.print(f"[red]Сначала обработай статью: sciassist process {citekey}[/red]")
         raise typer.Exit(1)
 
-    # First 600 words of paper as similarity query
     query = " ".join(md.read_text(encoding="utf-8").split()[:600])
 
     indexer = RAGIndexer()
@@ -345,51 +303,20 @@ def gaps(
 
 async def _gaps(topic: str, n: int) -> None:
     from sciassist.utils.logging import setup_logging
-    from sciassist.indexing.rag_indexer import RAGIndexer
-    from sciassist.router.model_router import ModelRouter
-    from sciassist.utils.lm_studio_client import LMStudioClient
-    from sciassist.note_generation.obsidian_builder import _make_messages, _load_prompt, _render_prompt
+    from sciassist.web.services import gaps as _gaps_svc
     setup_logging()
 
-    console.print(f"[cyan]Ищу top-{n} статей по теме '{topic}'…[/cyan]")
-    indexer = RAGIndexer()
-    raw = await indexer.query(topic, top_k=n * 3, collection="papers_notes")
-
-    # Collect unique citekeys + note previews
-    metas = raw.get("metadatas", [[]])[0]
-    docs  = raw.get("documents",  [[]])[0]
-
-    seen: dict[str, str] = {}
-    for meta, doc in zip(metas, docs):
-        ck = meta.get("citekey", "")
-        if ck and ck not in seen:
-            seen[ck] = doc[:800]
-        if len(seen) >= n:
-            break
-
-    if not seen:
-        console.print("[yellow]Нет данных в индексе[/yellow]")
+    res = await _gaps_svc(topic, papers=n, on_step=_step_print)
+    if not res["ok"]:
+        console.print(f"[red]{res['error']}[/red]")
         return
 
-    context = "\n\n---\n\n".join(f"[{ck}]:\n{text}" for ck, text in seen.items())
-    prompt_text = _render_prompt(_load_prompt("gap_analysis"), topic=topic, papers_context=context)
-
-    console.print(f"[cyan]Gap analysis по {len(seen)} статьям…[/cyan]")
-    router = ModelRouter()
-    spec = router.select("deep_analysis")
-    llm = LMStudioClient()
-    raw_resp = await llm.chat(
-        messages=_make_messages(prompt_text),
-        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,
-    )
-
-    from sciassist.note_generation.obsidian_builder import _parse_json
-    result = _parse_json(raw_resp)
-
-    if not result:
-        console.print(raw_resp)
+    d = res["data"]
+    if d.get("parsed") is None:
+        console.print(d.get("raw", ""))
         return
 
+    result = d["parsed"]
     for key, label in [
         ("open_problems",        "🔴 Нерешённые проблемы"),
         ("promising_directions", "🟢 Перспективные направления"),
@@ -421,45 +348,17 @@ def draft_related_work(
 
 async def _draft_related_work(topic: str, n: int) -> None:
     from sciassist.utils.logging import setup_logging
-    from sciassist.indexing.rag_indexer import RAGIndexer
-    from sciassist.router.model_router import ModelRouter
-    from sciassist.utils.lm_studio_client import LMStudioClient
-    from sciassist.note_generation.obsidian_builder import _make_messages, _load_prompt, _render_prompt, _parse_json
+    from sciassist.web.services import draft_related_work as _draft_svc
     setup_logging()
 
-    console.print(f"[cyan]Собираю контекст: top-{n} статей по '{topic}'…[/cyan]")
-    indexer = RAGIndexer()
-    raw = await indexer.query(topic, top_k=n * 3, collection="papers_notes")
-
-    metas = raw.get("metadatas", [[]])[0]
-    docs  = raw.get("documents",  [[]])[0]
-
-    seen: dict[str, str] = {}
-    for meta, doc in zip(metas, docs):
-        ck = meta.get("citekey", "")
-        if ck and ck not in seen:
-            seen[ck] = doc[:600]
-        if len(seen) >= n:
-            break
-
-    if not seen:
-        console.print("[yellow]Нет данных[/yellow]")
+    res = await _draft_svc(topic, papers=n, on_step=_step_print)
+    if not res["ok"]:
+        console.print(f"[red]{res['error']}[/red]")
         return
 
-    context = "\n\n".join(f"[{ck}]: {text}" for ck, text in seen.items())
-    prompt_text = _render_prompt(_load_prompt("related_work_draft"), topic=topic, papers_context=context)
-
-    console.print(f"[cyan]Генерирую Related Work ({len(seen)} источников)…[/cyan]")
-    router = ModelRouter()
-    spec = router.select("deep_analysis")
-    llm = LMStudioClient()
-    draft = await llm.chat(
-        messages=_make_messages(prompt_text),
-        model=spec.name, temperature=0.4, timeout=spec.timeout,
-    )
-
-    console.print(Panel(draft, title=f"[bold]Related Work: {topic}[/bold]"))
-    console.print(f"\n[dim]Источники: {', '.join(seen.keys())}[/dim]")
+    d = res["data"]
+    console.print(Panel(d["draft"], title=f"[bold]Related Work: {topic}[/bold]"))
+    console.print(f"\n[dim]Источники: {', '.join(d['sources'])}[/dim]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -476,33 +375,16 @@ def analyze(
 
 async def _analyze(citekey: str, mode: str) -> None:
     from sciassist.utils.logging import setup_logging
-    from sciassist.router.model_router import ModelRouter
-    from sciassist.utils.lm_studio_client import LMStudioClient
-    from sciassist.note_generation.obsidian_builder import (
-        _make_messages, _load_prompt, _render_prompt, _parse_json, _truncate
-    )
+    from sciassist.web.services import analyze as _analyze_svc
     setup_logging()
 
-    cfg = __import__("sciassist.config", fromlist=["get_settings"]).get_settings()
-    md = cfg.raw_markdown_path / f"{citekey}.md"
-    if not md.exists():
-        console.print(f"[red]Markdown не найден. Запусти: sciassist process {citekey}[/red]")
-        raise typer.Exit(1)
+    res = await _analyze_svc(citekey, mode=mode, on_step=_step_print)
+    if not res["ok"]:
+        console.print(f"[red]{res['error']}[/red]")
+        return
 
-    full_text = _truncate(md.read_text(encoding="utf-8"), max_words=5000)
-    prompt_text = _render_prompt(_load_prompt(mode), paper_text=full_text)
-
-    router = ModelRouter()
-    spec = router.select("reasoning")
-    llm = LMStudioClient()
-
-    console.print(f"[cyan]Анализ '{citekey}' (mode={mode})…[/cyan]")
-    raw = await llm.chat(
-        messages=_make_messages(prompt_text),
-        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,
-    )
-
-    result = _parse_json(raw)
+    d = res["data"]
+    result = d["parsed"]
     if result:
         for key, label in [
             ("strengths",           "✅ Сильные стороны"),
@@ -519,7 +401,7 @@ async def _analyze(citekey: str, mode: str) -> None:
                 else:
                     console.print(f"  {val}")
     else:
-        console.print(raw)
+        console.print(d["raw"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -591,6 +473,31 @@ def zotero_status() -> None:
     t.add_row("В реестре (ok)",     str(sum(1 for v in reg.get("items", {}).values() if v["status"] == "ok")))
     t.add_row("В реестре (failed)", str(sum(1 for v in reg.get("items", {}).values() if v["status"] == "failed")))
     console.print(t)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# serve
+# ─────────────────────────────────────────────────────────────────────────────
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option("--host", help="Bind address (по умолчанию 127.0.0.1 — только локально)")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", "-p")] = 8000,
+) -> None:
+    """Запустить локальный веб-интерфейс SciAssist (FastAPI + статика).
+
+    Сервер слушает ТОЛЬКО 127.0.0.1 — наружу не торчит, в духе offline-проекта.
+    Открыть в браузере: http://127.0.0.1:8000
+    """
+    import uvicorn
+    console.print(f"[cyan]Запускаю SciAssist Web на http://{host}:{port}[/cyan]")
+    console.print("[dim]Ctrl-C для остановки[/dim]")
+    uvicorn.run(
+        "sciassist.web.app:app",
+        host=host,
+        port=port,
+        log_level="info",
+        reload=False,
+    )
 
 
 if __name__ == "__main__":

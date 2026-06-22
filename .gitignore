@@ -5,7 +5,8 @@ architecture/
 
 # Data (generated)
 data/
-
+agents/
+.qwen/
 # Python
 __pycache__/
 *.py[cod]

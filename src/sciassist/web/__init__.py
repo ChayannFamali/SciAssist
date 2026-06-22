@@ -1,0 +1,1 @@
+"""SciAssist Web — локальный FastAPI-интерфейс поверх CLI."""
