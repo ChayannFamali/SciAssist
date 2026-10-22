@@ -24,6 +24,12 @@ chunking:
   papers_notes:
     chunk_size: 800
     chunk_overlap: 100
+  textbooks:
+    # chunk_size/chunk_overlap — в СЛОВАХ (chunker word-count), не в символах!
+    # 1600 слов ≈ 9.5k симв/чанк → батч эмбеддинга ~11 мин > SDK-таймаута 600с.
+    # 400 слов ≈ 2.5k симв — уровень определений/теорем для RAG-поиска.
+    chunk_size: 400
+    chunk_overlap: 100
 
 rag:
   embedding_model: "text-embedding-bge-m3"

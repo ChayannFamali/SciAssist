@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
-from openai import AsyncOpenAI, APIConnectionError, APITimeoutError
+from openai import AsyncOpenAI, APIConnectionError, APITimeoutError, BadRequestError
 
 from sciassist.config import get_settings
 from sciassist.exceptions import LMStudioError
@@ -80,6 +80,17 @@ class LMStudioClient:
                     duration_ms=(time.perf_counter() - t) * 1000,
                     error=str(exc)[:200],
                 )
+            except BadRequestError as exc:
+                # LM Studio иногда оборачивает флейк движка (peg-native/harmony-парсер
+                # gpt-oss) в 400 — это ошибка сервера, а не запроса: ретраить.
+                if "peg-native" not in str(exc):
+                    raise
+                last_exc = exc
+                self._log(
+                    model=model, task=task,
+                    duration_ms=(time.perf_counter() - t) * 1000,
+                    error=f"peg-native flake: {str(exc)[:150]}",
+                )
         raise LMStudioError(
             f"LM Studio недоступен после {attempts} попыток ({task}).\n"
             f"Проверь: http://localhost:1234/v1/models\n"
@@ -98,23 +109,56 @@ class LMStudioClient:
         temperature: float = 0.3,
         max_tokens: int = 4096,
         timeout: int | None = None,
+        on_token: "callable | None" = None,
     ) -> str:
-        """Send chat completion. Thinking mode disabled for Qwen3 models."""
+        """Send chat completion. Thinking mode disabled for Qwen3 models.
+        on_token(str) — стрим: коллбек на каждый чанк (первый токен без ожидания полного ответа)."""
         t_out = timeout or self._cfg.lm_studio_timeout_fast
 
         async def _call():
-            resp = await self._client.chat.completions.create(
+            if on_token is None:
+                resp = await self._client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=t_out,
+                    extra_body={"enable_thinking": False},  # Qwen3: отключить thinking
+                )
+                msg = resp.choices[0].message
+                # Fallback: thinking models иногда кладут ответ в reasoning_content
+                content = msg.content or getattr(msg, "reasoning_content", "") or ""
+                return content, resp.usage
+
+            # стрим-путь: ретрай допустим только до первого токена (частичный ответ ретраить нельзя)
+            parts: list[str] = []
+            usage = None
+            stream = await self._client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=t_out,
-                extra_body={"enable_thinking": False},  # Qwen3: отключить thinking
+                stream=True,
+                extra_body={"enable_thinking": False},
             )
-            msg = resp.choices[0].message
-            # Fallback: thinking models иногда кладут ответ в reasoning_content
-            content = msg.content or getattr(msg, "reasoning_content", "") or ""
-            return content, resp.usage
+            it = stream.__aiter__()
+            while True:
+                try:
+                    chunk = await it.__anext__()
+                except StopAsyncIteration:
+                    break
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+                for ch in chunk.choices or []:
+                    if ch.delta and ch.delta.content:
+                        parts.append(ch.delta.content)
+                        on_token(ch.delta.content)
+            content = "".join(parts)
+            if not content and usage is None:
+                # пустой стрим без usage = фейл до генерации: ретрай через проброс
+                raise APIConnectionError(message="пустой стрим ответа", request=None)
+            return content, usage
 
         return await self._retry(_call, task="chat", model=model)
 
@@ -122,7 +166,12 @@ class LMStudioClient:
     async def embed(self, texts: list[str], model: str = "text-embedding-bge-m3") -> list[list[float]]:
         """Get embeddings for a list of texts."""
         async def _call():
-            resp = await self._client.embeddings.create(model=model, input=texts)
+            # Явный таймаут: без него SDK-дефолт 600с < времени большого батча →
+            # SDK молча перезапускает, а сервер до конца считает «трупы»
+            resp = await self._client.embeddings.create(
+                model=model, input=texts,
+                timeout=self._cfg.lm_studio_timeout_reasoning,
+            )
             return [item.embedding for item in resp.data], getattr(resp, "usage", None)
 
         return await self._retry(_call, task="embed", model=model)

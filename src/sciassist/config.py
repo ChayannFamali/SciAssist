@@ -3,12 +3,18 @@ from functools import lru_cache
 from pathlib import Path
 
 import yaml
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Anchor .env to the repo root: without this, pydantic-settings looks
+# for .env relative to CWD and silently falls back to Windows defaults.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_REPO_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -24,10 +30,16 @@ class Settings(BaseSettings):
     obsidian_concepts_folder: str = "concepts"
     obsidian_datasets_folder: str = "datasets"
 
+    # Zotero local API write authorization (from authorize_local, "Always Allow")
+    zotero_local_api_key: str | None = None
+
     # LM Studio
     lm_studio_url: str = "http://localhost:1234/v1"
     lm_studio_timeout_reasoning: int = 300
     lm_studio_timeout_fast: int = 60
+
+    # Per-machine model router override (laptop: configs/model_router.laptop.yaml)
+    model_router: Path | None = Field(default=None, validation_alias="SCIASSIST_MODEL_ROUTER")
 
     # Data paths
     project_root: Path = Path("H:/SciAssist")

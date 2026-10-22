@@ -1,8 +1,15 @@
 # SciAssist
 
-Локальный AI-ассистент для научной работы. Читает PDF, строит структурированные заметки в Obsidian, отвечает на вопросы по библиотеке, генерирует черновики.
+Локальный AI-ассистент для научной работы. Читает PDF, строит структурированные заметки в Obsidian, отвечает на вопросы по библиотеке (RAG), находит пробелы и генерирует черновики.
 
 **Всё работает offline — без облаков, без API-ключей, без VPN.**
+
+Работает на двух машинах с общим git-репозиторием:
+
+- **ПК** (Windows, CUDA) — GPU-стек
+- **Ноутбук** (Linux, Core Ultra 7 255H, 32 ГБ RAM, без dGPU) — CPU-стек
+
+Стек моделей по машинам — **[config.md](config.md)** (источник истины — `configs/model_router*.yaml`).
 
 ---
 
@@ -10,253 +17,186 @@
 
 | Компонент | Версия |
 |---|---|
-| Windows | 10/11 x64 |
+| ОС | Windows 10/11 x64 или Linux |
 | Python | 3.11+ |
 | [LM Studio](https://lmstudio.ai/) | последняя |
 | [Zotero](https://www.zotero.org/) | 9 |
 | [Better BibTeX](https://github.com/retorquere/zotero-better-bibtex) | 9+ |
+| Obsidian | любой (vault = папка заметок) |
 
 ### Модели в LM Studio (скачать заранее)
 
-| Роль | Модель |
-|---|---|
-| Основной анализ | Qwen3.6 35B A3B Q4_K_M |
-| Reasoning | Magistral Small 2509 Q4_K_M |
-| Чат / Саммари | Qwen3.5 9B Q4_K_M |
-| Vision (фигуры) | Qwen3-VL-8B Q4_K_M |
-| Embeddings | text-embedding-bge-m3 |
+Полные таблицы с замерами и обоснованиями — в **[config.md](config.md)**. Кратко:
 
-> ⚠️ Для Qwen3-моделей в LM Studio отключи **Enable Thinking** (иначе генерация зависает).
+| Роль | Ноутбук (CPU) | ПК (CUDA) |
+|---|---|---|
+| heavy-аналитика (critique/gaps) | gemma-4-26b-a4b-qat | qwen3.6-35b-a3b / magistral-small |
+| extraction (structure/entity) | gemma-3n-e4b | qwen3.5-9b |
+| summary / chat | gemma-4-e4b / gemma-3n-e4b | qwen3.5-9b |
+| vision (фигуры) | qwen3-vl-4b | qwen3-vl-8b |
+| embeddings | **text-embedding-bge-m3** (одинаково на обеих — НЕ менять) | **text-embedding-bge-m3** |
+
+> ⚠️ Моделям с режимом thinking (gemma-4, qwen-гибриды) выключи **Enable Thinking**
+> нативным тумблером в настройках LM Studio — `extra_body` из API LM Studio игнорирует.
+> Ноутбучные LM Studio-конфиги (ctx/threads/FA/KV) — в [config.md](config.md).
 
 ---
 
 ## Установка
 
-```powershell
-cd H:\SciAssist
-python -m venv .venv
-.venv\Scripts\activate
-pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -e .
+```bash
+git clone <repo> && cd SciAssist
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -e .                                      # или зеркало: --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 ```
+
+> Команда `sciassist` живёт в venv. В каждом новом терминале: `source .venv/bin/activate` —
+> или напрямую `.venv/bin/sciassist`, или алиас в `~/.bashrc`
+> (`alias sciassist='/mnt/newdisk/SciAssist/.venv/bin/sciassist'`).
 
 ### Настройка Zotero
 
-1. Zotero → Preferences → Advanced → Config Editor
-2. `extensions.zotero.httpServer.enabled` → `true`
-3. `extensions.zotero.httpServer.localAPI.enabled` → `true`
-4. Перезапусти Zotero
-5. Better BibTeX: Settings → Citation Keys → формула: `auth.lower + year + shorttitle(1,1).lower`
+1. Zotero → Preferences → Advanced → Config Editor:
+   `extensions.zotero.httpServer.enabled` → `true`;
+   `extensions.zotero.httpServer.localAPI.enabled` → `true`
+2. Better BibTeX: Settings → Citation Keys → формула: `auth.lower + year + shorttitle(1,1).lower`
+3. **Разрешение local API на запись**: при первом обращении Zotero спросит разрешение
+   (или запусти authorize) — выбери **«Always Allow»**; ключ пойдёт в `.env`
+   (`ZOTERO_LOCAL_API_KEY`)
 
 ### Настройка путей
 
-```powershell
-Copy-Item .env.example .env
-# Отредактируй .env под свои пути
+```bash
+cp .env.example .env     # затем отредактируй под свою машину
 ```
+
+Ключевое: `SCIASSIST_MODEL_ROUTER` — какой роутер грузить
+(`configs/model_router.laptop.yaml` на ноуте; на ПК — не задавать, живёт
+`configs/model_router.yaml`). Пути Zotero/vault/данных — под свою машину.
 
 ### Проверка
 
-```powershell
-python scripts/healthcheck.py
+```bash
+python scripts/healthcheck.py    # все строки должны быть зелёными ✅
 ```
-
-Все строки должны быть зелёными ✅.
 
 ---
 
-## Первый запуск
+## Обработка статьи
 
-```powershell
-# Проверить модели в LM Studio (обнови configs/model_router.yaml)
-curl http://localhost:1234/v1/models
-
-# Обработать одну статью
-sciassist process vaswani2017attention
-
-# Проверить результат
-sciassist ask "What is the main contribution?"
+```bash
+sciassist process @citekey           # одна статья (PDF → markdown → заметка → индекс)
+sciassist process --queue           # вся Zotero-очередь
+sciassist process @citekey --force  # переобработать
 ```
+
+Что происходит внутри (5 LLM-вызовов на ноуте, ~25 мин/статья на CPU;
+на ПК существенно быстрее):
+
+```
+PDF → markdown (текстовый слой PyMuPDF; сканы — через knowledge add --ocr, роль ocr)
+    → фигуры (VLM, роль vision) — описания с дисклеймером
+    → индексация (bge-m3 → ChromaDB: papers_full)
+    → LLM-конвейер заметки:
+        1. summary           (tldr / problem / limitations)
+        2. structure         (method / key_ideas / experiments / results, EN-JSON)
+        2b. translation      (structure → RU, числа сверяются с оригиналом)
+        3. entity_extraction (методы/датасеты/концепты — grounded-фильтр)
+        4. critique          (strengths/weaknesses с цитатами из текста)
+    → заметка Obsidian + индексация papers_notes
+```
+
+**Анти-галлюцинационная обвязка** (подробности в [config.md](config.md)):
+числа сверяются с текстом статьи, термы entity — заземлены по тексту,
+цитаты критики проверяются substring-ом, пустые секции помечаются явно.
 
 ---
 
 ## Как работает RAG
 
-SciAssist использует **гибридный Retrieval-Augmented Generation**: перед ответом
-система ищет релевантные фрагменты в твоей библиотеке двумя способами
-одновременно, сливает результаты, отсеивает мусор, переупорядочивает их умной
-моделью и только потом передаёт в LLM как контекст.
+Гибридный retrieval + генерация по контексту:
 
 ```
 Вопрос
-  │
-  ├─────────────────────────────┐
-  ▼                             ▼
-[Dense-поиск]               [Sparse-поиск]
-эмбеддинг вопроса           BM25 по словам
-(text-embedding-bge-m3)     (rank_bm25, in-memory)
-поиск в ChromaDB            точное совпадение терминов
-по косинусу                 (исходный вопрос)
-  │                             │
-  └──────────────┬──────────────┘
-                 ▼
-        [RRF — Reciprocal Rank Fusion]
-        честное слияние двух рейтингов по рангам (K=60)
-                 │
-                 ▼
-        [Фильтры]
-        • косинусный порог (min_score, по умолч. 0.4)
-          BM25-хиты порог обходят
-        • денилист секций (references, bibliography,
-          acknowledgments)
-                 │
-                 ▼
-        [Re-ranking]
-        LLM-листвайз-ранкер (роль `rerank`) переупорядочивает
-        чанки по релевантности и выбрасывает бесполезные
-                 │
-                 ▼
-        [Дедуп + срез]
-        не более max_per_paper (3) чанков из одной статьи,
-        итого top-K фрагментов
-                 │
-                 ▼
-        [Augment] — сборка контекста:
-        [citekey] (раздел: section): текст...
-                 │
-                 ▼
-        [Generate] — LLM (роль `chat`) отвечает ТОЛЬКО по
-        контексту, цитируя [citekey]
-                 │
-                 ▼
-        Ответ + список источников со score
+  ├─ [dense]  эмбеддинг (bge-m3) → ChromaDB, косинус
+  │           HyDE: LLM-гипотеза ответа расширяет dense-запрос (вкл. по умолчанию)
+  ├─ [sparse] BM25 (rank_bm25, in-memory)
+  │           RU-вопросы к EN-статьям: вопрос автоматически дополняется
+  │           EN-переводом (роль rerank) — RU-лексика в EN-корпусе даёт 0 хитов
+  └─→ [RRF-fusion] → фильтры (косинусный порог, денилист секций)
+        → [rerank: listwise LLM, пул 10 → топ-5] → дедуп (max 3/статья)
+        → [generate] ответ с [citekey]-цитатами (роль chat)
 ```
+
+Метрики score = `1 − distance`: > 0.85 высокая, 0.6–0.85 умеренная, < 0.6 слабая.
 
 ### Опции retrieval
 
-| Опция            | По умолчанию  | Что делает |
-|------------------|---------------|------------|
-| `hybrid`         | `True`        | Dense + Sparse + RRF. Если `False` — только dense-поиск. |
-| `rerank`         | `True`        | LLM-переупорядочивание чанков. Отключи для скорости. |
-| `hyde`           | `False`       | HyDE: LLM генерирует гипотетический абзац-ответ и добавляет его к **dense**-запросу (BM25 при этом всегда идёт по исходному вопросу). Помогает на коротких/неточных вопросах. |
-| `min_score`      | `0.4`         | Косинусный порог отсева. BM25-хиты его игнорируют. |
-| `max_per_paper`  | `3`           | Сколько чанков максимум брать из одной статьи. |
-| `collection`     | `papers_full` | `both` — искать в `papers_full` + `papers_notes` с честным чередованием. |
+| Опция | По умолчанию | Что делает |
+|---|---|---|
+| `hybrid` | `True` | Dense + Sparse + RRF |
+| `rerank` | `True` | LLM-переупорядочивание (отключи для скорости) |
+| `hyde` | `True` | Гипотеза-ответ в dense-запрос |
+| `expand_en` | `True` | EN-дополнение RU-вопроса для BM25 |
+| `pool_k` | `10` | Пул кандидатов на rerank |
+| `min_score` | `0.4` | Косинусный порог (BM25-хиты обходят) |
+| `max_per_paper` | `3` | Максимум чанков из одной статьи |
+| `collection` | `papers_full` | `papers_full` / `papers_notes` / `textbooks` / `both` / `all` |
 
-## Как статья попадает в индекс
+Коллекции: `papers_full` (статьи, чанк ≈1200 слов), `papers_notes` (заметки, 800),
+`textbooks` (база знаний, 400). `both` = статьи+заметки, `all` = все три —
+честное чередование при сборке контекста.
 
-```
-PDF → olmocr (OCR) → Markdown
-    → section-aware чанкинг (≈1200 слов, overlap 200,
-      с определением раздела: abstract / methods / results / …)
-    → эмбеддинги (text-embedding-bge-m3)
-    → ChromaDB
-```
-
-При `sciassist process @citekey` статья автоматически индексируется.
-Индекс хранится в `data\chroma_db\`, основная коллекция — `papers_full`.
-
-Чанкер отслеживает раздел статьи (по заголовкам и нумерации) и кладёт его в
-метаданные каждого чанка. Это используется и при фильтрации (денилист секций),
-и при сборке контекста — в ответе видно, из какого раздела взят фрагмент.
-
-## Параметры поиска
-
-| Параметр        | По умолчанию  | Описание |
-|-----------------|---------------|----------|
-| `--top`         | `5`           | Кол-во чанков для контекста |
-| `collection`    | `papers_full` | Коллекция ChromaDB (`both` — две сразу) |
-| `min_score`     | `0.4`         | Косинусный порог отсева (BM25-хиты обходят) |
-| `max_per_paper` | `3`           | Максимум чанков из одной статьи |
-| `hybrid`        | вкл.          | Dense + Sparse (BM25) + RRF |
-| `rerank`        | вкл.          | LLM-переупорядочивание |
-| `hyde`          | выкл.         | Расширение dense-запроса гипотетическим абзацем |
+### База знаний (учебники)
 
 ```bash
-sciassist ask "вопрос" --top 10          # расширенный контекст
-sciassist search "запрос" --top 5        # только поиск, без LLM
+sciassist knowledge add <pdf>          # индексировать учебник (с скан-детектом; --ocr для сканов)
+sciassist knowledge list               # что в базе
+sciassist knowledge stats              # статистика
+sciassist ask "..." --col all          # искать по статьям + заметкам + учебникам
 ```
 
-### Что значит score
+---
 
-Score = `1 − distance` (косинусная схожесть).
-
-| Score | Интерпретация |
-|---|---|
-| > 0.85 | Высокая релевантность |
-| 0.6–0.85 | Умеренная релевантность |
-| < 0.6 | Слабая связь с вопросом |
-
-### Ограничения RAG
-
-- LLM отвечает **только по проиндексированным статьям** — не придумывает.  
-- Если статья не обработана (`sciassist process`) — она недоступна для поиска.  
-- Качество ответа зависит от качества OCR: плохой текстовый слой → плохие чанки.  
-- Очень короткий вопрос → слабый эмбеддинг → менее точный retrieval. Формулируй развёрнуто.
-- Reranker и HyDE — это дополнительные вызовы LLM. Они повышают качество, но
-  замедляют ответ. Для быстрых ответов их можно отключить.
-- BM25-индекс строится в памяти при первом запросе к коллекции и кэшируется.
-  Первый запрос после старта может быть чуть медленнее.
-  
 ## Ежедневный workflow
 
 ```
-1. Открыть Zotero, добавить статьи в коллекцию SciAssist Queue
+1. Zotero: добавить статьи в коллекцию SciAssist Queue
 2. sciassist process --queue
-3. Obsidian — читать структурированные заметки
-4. sciassist ask "вопрос" — искать по библиотеке
+3. Obsidian: читать структурированные заметки
+4. sciassist ask "вопрос"              # поиск по библиотеке
+5. sciassist knowledge add <учебник>   # пополнить базу знаний
 ```
 
 ---
 
 ## Справка по командам
 
-### Обработка
+```bash
+# Обработка
+sciassist process @citekey [--force] [--only=markdown]   # --queue — вся очередь
 
-```powershell
-sciassist process @citekey              # одна статья
-sciassist process @citekey --only=markdown  # только OCR
-sciassist process --queue              # вся очередь
-sciassist process --queue --force      # переобработать всё
-```
-
-### Поиск и вопросы
-
-```powershell
-sciassist search "запрос" --top 10     # семантический поиск (без LLM)
-sciassist ask "вопрос"                 # RAG-ответ с цитатами
+# Поиск и вопросы
+sciassist search "запрос" --top 10     # только retrieval, без LLM
+sciassist ask "вопрос" [--col both|all] [--top N]
 sciassist similar @citekey --top 10   # похожие статьи
-```
 
-### Анализ и написание
-
-```powershell
+# Анализ и написание
 sciassist analyze @citekey --mode critique
 sciassist gaps "тема" --papers 15
 sciassist draft related-work "тема" --papers 10
-```
 
-### Управление заметками
+# Заметки
+sciassist note @citekey [--force]     # --force сохраняет «Мои мысли»
 
-```powershell
-sciassist note @citekey                # создать/обновить заметку
-sciassist note @citekey --force        # пересоздать (сохраняет "Мои мысли")
-```
+# База знаний
+sciassist knowledge add|list|stats
 
-### Zotero
+# Zotero
+sciassist zotero list|setup|status
 
-```powershell
-sciassist zotero list                  # список в Queue
-sciassist zotero list --collection "Reading"
-sciassist zotero setup                 # создать коллекции
-sciassist zotero status               # статистика
-```
-
-### Система
-
-```powershell
-sciassist health                       # диагностика
-sciassist stats                        # статистика индекса
-sciassist logs --tail 20               # последние LLM-вызовы
+# Система
+sciassist health|stats|logs --tail 20
 ```
 
 ---
@@ -264,41 +204,57 @@ sciassist logs --tail 20               # последние LLM-вызовы
 ## Структура данных
 
 ```
-H:\SciAssist\
-├── data\
-│   ├── raw_markdown\           # OCR-результаты
-│   ├── extracted_figures\      # фигуры + figures.json
-│   ├── chroma_db\              # векторная БД
-│   ├── processed_registry.json # что обработано
-│   └── logs\                   # логи + llm_calls.jsonl
-D:\SciVault\
-├── papers\   @citekey.md       # заметки Obsidian
-├── concepts\ concept.md        # методы и концепции
-└── datasets\ dataset.md        # датасеты
+<PROJECT_ROOT>/                 # репозиторий (общий через git)
+├── configs/                    # роутеры моделей + промпты + settings
+├── data/raw_markdown/           # markdown-версии статей
+├── data/extracted_figures/      # фигуры + описания
+├── data/chroma_db/              # векторная БД (papers_full/notes/textbooks)
+└── data/logs/                   # логи + llm_calls.jsonl
+
+<OBSIDIAN_VAULT>/                # задаётся в .env
+├── papers/@citekey.md           # структурированные заметки
+├── concepts/  datasets/  ideas/  drafts/
 ```
+
+`processed_registry.json` — реестр обработанного (статус Queue/Processed).
 
 ---
 
 ## Известные ограничения
 
-**Zotero write (501):** Local API не поддерживает запись — теги `processed` и перемещение в `SciAssist Processed` не работают. Статус отслеживается через `processed_registry.json`.
+**Скорость на CPU:** ноут без GPU — полный цикл статьи ~25 мин (5 LLM-вызовов
++ фигуры + индексация). На ПК с CUDA — единицы минут.
 
-**Olmocr:** Требует anchor text — работает только если в PDF есть текстовый слой. Для чистых сканов нужна отдельная настройка.
+**Zotero write:** local API на запись требует одноразового разрешения
+(«Always Allow», ключ в `.env`). Без него — 401.
 
-**Qwen3 thinking mode:** Если включён — модель зависает. Отключи в LM Studio для всех используемых моделей.
+**Thinking-режимы:** моделям с thinking выключай тумблер в LM Studio
+(нативный конфиг модели, не API). «Думающие» модели без тумблера на CPU
+сгорают минутами (qwen3.5-4b: 912с с нулём контента).
 
-**VLM контекст:** Qwen3-VL загружен с 4096 токенами. Крупные изображения автоматически ресайзятся до 1024px.
+**olmocr:** требует текстовый слой в PDF. Чистые сканы — через `--ocr`
+(дорого на CPU). `knowledge add` детектит сканы и останавливается без `--ocr`.
+
+**VLM-описания фигур:** генерируются и НЕ проверяются — в заметке дисклеймер.
+
+**CLI exit code:** одиночный `process` при ошибке честно выходит с кодом 1
+(traceback в stderr). `--queue` не останавливается на упавшей статье (✗ в реестре,
+дальше по очереди). Не маскируй код возврата пайпами (`| tail` вернёт код tail).
 
 ---
 
 ## Troubleshooting
 
-**`LM Studio недоступен`** — запусти LM Studio, загрузи нужные модели.
+**`LM Studio недоступен`** — запусти LM Studio; модели грузятся JIT по роутеру.
 
-**`PDF не найден`** — проверь что в Zotero к записи прикреплён PDF (стрелка ▶ под записью). Правый клик → Find Available PDF.
+**`PDF не найден`** — прикрепи PDF к записи Zotero (linked file — не копия — ок).
 
-**`JSON parse failed`** — модель вернула пустой ответ (thinking mode). Отключи в LM Studio.
+**`JSON parse failed` / пустые секции** — проверь, что thinking выключен
+в конфиге модели LM Studio. Пустые секции помечаются в заметке явно.
 
-**`501 Not Implemented`** — Zotero local API не поддерживает запись. Игнорируй, обработка прошла успешно.
+**`401` от Zotero** — повтори authorize и выбери «Always Allow».
 
-**Медленная генерация** — уменьши `_NOTE_MAX_WORDS` в `obsidian_builder.py` (текущее: 5000).
+**Медленная генерация на ноуте** — уменьши `_NOTE_MAX_WORDS` в
+`obsidian_builder.py` (текущее: 5000) или понизь кванты моделей.
+
+**RAG-оценка** — `scripts/rag_eval.py` (hit@K-матрица вариантов retrieval).

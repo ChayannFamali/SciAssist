@@ -1,4 +1,5 @@
 """RAG query engine — embed → retrieve → filter → generate answer."""
+import re
 from collections import defaultdict
 
 from pydantic import BaseModel
@@ -19,6 +20,7 @@ class SourceChunk(BaseModel):
     section: str
     score: float
     preview: str
+    text: str = ""          # полный чанк (preview — обрезок для UI; eval матчит по text)
 
 
 class RAGAnswer(BaseModel):
@@ -87,6 +89,30 @@ class QueryEngine:
             return question
 
     # ------------------------------------------------------------------
+    # RU→EN расширение sparse-запроса: BM25 RU-лексики в EN-корпусе = 0
+    # lexical-хитов (структурный разрыв языков: вопросы RU, статьи EN;
+    # зеркальная физика structure-перевода). EN-строка ДОБАВЛЯЕТСЯ к вопросу —
+    # RU-токены остаются для RU-корпуса (учебники). Роль rerank = lfm2.5:
+    # интерактивный MoE, temp 0, мгновенный.
+    # ------------------------------------------------------------------
+    async def _expand_en(self, question: str) -> str:
+        spec = self._router.select("rerank")
+        try:
+            en = await self._llm.chat(
+                messages=[{"role": "user", "content":
+                    "Translate this question into English for scientific literature search. "
+                    "Return ONLY the English translation, one line, nothing else.\n\n"
+                    f"Question: {question}"}],
+                model=spec.name, temperature=spec.temperature, timeout=spec.timeout,
+                max_tokens=200,
+            )
+            en = (en or "").strip()
+            return en if re.search(r"[A-Za-z]", en) else ""
+        except Exception as e:
+            logger.warning(f"expand_en упал ({e}); sparse = исходный вопрос")
+            return ""
+
+    # ------------------------------------------------------------------
     # Гибридный retrieve: dense (HyDE?) + sparse (BM25, исходный вопрос) → RRF
     # Возвращает кортежи (doc, meta, cos | None, in_sparse: bool)
     # ------------------------------------------------------------------
@@ -139,24 +165,40 @@ class QueryEngine:
         max_per_paper: int = _DEFAULT_MAX_PER_PAPER,
         rerank: bool = True,
         hybrid: bool = True,
-        hyde: bool = False,                                    # ← добавлено
+        hyde: bool = True,
+        expand_en: bool = True,
+        pool_k: int = 10,                                       # пул кандидатов на rerank
+        generate: bool = True,                                 # False = только retrieval (eval)
+        on_token: "callable | None" = None,                   # стрим ответа в CLI
     ) -> RAGAnswer:
-        # 1. Формируем запросы: dense может быть расширен через HyDE,
-        #    sparse всегда исходный вопрос (BM25 плохо работает с гипотезами)
-        dense_q  = await self._hyde(question) if hyde else question
+        # 1. dense: HyDE-гипотеза; sparse: вопрос + EN-перевод (разрыв языков
+        #    RU-вопрос / EN-корпус; BM25 гипотезами не кормим — исходный вопрос)
+        dense_q = await self._hyde(question) if hyde else question
         sparse_q = question
+        if expand_en and re.search(r"[А-Яа-яЁё]", question):
+            en = await self._expand_en(question)
+            if en:
+                sparse_q = f"{question}\n{en}"
+                logger.info(f"expand_en: sparse +{len(en)} симв. EN")
 
         if hyde and dense_q != question:
             logger.info(f"HyDE: dense-запрос расширен ({len(dense_q)} симв.)")
 
-        # 2. Retrieve — одна коллекция или честное чередование двух
+        # 2. Retrieve — пул pool_k (top_k остаётся размером контекста)
         if collection == "both":
-            cf, best_f = await self._retrieve(dense_q, sparse_q, top_k, "papers_full",  hybrid)
-            cn, best_n = await self._retrieve(dense_q, sparse_q, top_k, "papers_notes", hybrid)
+            cf, best_f = await self._retrieve(dense_q, sparse_q, pool_k, "papers_full",  hybrid)
+            cn, best_n = await self._retrieve(dense_q, sparse_q, pool_k, "papers_notes", hybrid)
             candidates = self._interleave(cf, cn)
             best_cos   = max(best_f, best_n)
+        elif collection == "all":
+            cf, best_f = await self._retrieve(dense_q, sparse_q, pool_k, "papers_full",  hybrid)
+            cn, best_n = await self._retrieve(dense_q, sparse_q, pool_k, "papers_notes", hybrid)
+            ct, best_t = await self._retrieve(dense_q, sparse_q, pool_k, "textbooks",     hybrid)
+            candidates = self._interleave(self._interleave(cf, cn), ct)
+            best_cos   = max(best_f, best_n, best_t)
         else:
-            candidates, best_cos = await self._retrieve(dense_q, sparse_q, top_k, collection, hybrid)
+            # papers_full | papers_notes | textbooks
+            candidates, best_cos = await self._retrieve(dense_q, sparse_q, pool_k, collection, hybrid)
 
         if not candidates:
             return RAGAnswer(
@@ -223,8 +265,12 @@ class QueryEngine:
             sources.append(SourceChunk(
                 citekey=citekey, section=section, score=score,
                 preview=(doc[:200] + "…") if len(doc) > 200 else doc,
+                text=doc,
             ))
         context = "\n\n---\n\n".join(ctx_parts)
+
+        if not generate:
+            return RAGAnswer(answer="", sources=sources, model="retrieval-only")
 
         # 7. Generate
         spec = self._router.select("chat")
@@ -234,5 +280,19 @@ class QueryEngine:
                 {"role": "user", "content": f"Контекст:\n\n{context}\n\nВопрос: {question}"},
             ],
             model=spec.name, temperature=spec.temperature, timeout=spec.timeout,
+            on_token=on_token,
         )
+
+        # 8. Cite-чек: ответ может цитировать источники, которых нет в выдаче
+        # ([x] не из чанков = галлюцинация источника; [[wikilink]] не считаем)
+        valid_cks = {s.citekey for s in sources}
+        cited = set(re.findall(r"(?<!\[)\[([a-z0-9][a-z0-9_\-.]{3,})\](?!\])", answer.lower()))
+        unknown = {c for c in cited if c not in valid_cks}
+        if unknown:
+            logger.warning(f"ask: ответ цитирует источники вне выдачи RAG: {sorted(unknown)}")
+            answer += (
+                "\n\n> [!warning] ⚠ Часть процитированных источников не из выдачи RAG "
+                f"({', '.join(sorted(unknown))}) — возможно, галлюцинация."
+            )
+
         return RAGAnswer(answer=answer, sources=sources, model=spec.name)

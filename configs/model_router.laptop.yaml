@@ -1,0 +1,118 @@
+# Ноутбук: ThinkBook 14 G8 (Core Ultra 7 255H, 32 ГБ RAM, без dGPU) — CPU-only.
+# Подключён через SCIASSIST_MODEL_ROUTER=configs/model_router.laptop.yaml в .env.
+# Все ID сверены с GET http://localhost:1234/v1/models (20 моделей, 2026-10-21;
+# нюанс: qwen3.5-4b в списке БЕЗ префикса qwen/ — сверяй id перед вписыванием).
+# embed НЕ МЕНЯТЬ: bge-m3 на обеих машинах → dim=1024 → индекс ChromaDB портативен.
+
+rules:
+  # Call 2/4 (extract_structure): extraction EN-JSON, затем перевод роли translation (Call 2b).
+  # Замер 2026-10-22 (bench_str2/str_ru_user): 163–177с, JSON 7/7, 8–9/12 чисел — быстрейшая
+  # и стабильнейшая. EN-язык 7/7 (зеркалит system+статью, RU-инструкция игнорируется во всех
+  # позициях) — лечится не борьбой с моделью, а отдельным вызовом translation (юзер 2026-10-22).
+  # e4b снята с primary: JSON-флейл 1/3 живых прогонов (299с prose-instead-of-JSON, v2-прогон —
+  # секции Метод/Эксперименты пустые). 12b: 495с 7/12 RU — в fallback. granite: 4–6/12 плавающие
+  # (run3 потерял 75/2000/1BLEU) — вне. bonsai Q1_0: префилл 1109с > 900с таймаута — вне.
+  structure:
+    primary: "google/gemma-3n-e4b"
+    fallback: ["google/gemma-4-e4b", "google/gemma-3-12b"]
+    max_context: 16000
+    temperature: 0.3
+    max_tokens: 3000
+    timeout: 900
+
+  # Call 2b (НОВАЯ, obsidian_builder): перевод EN-JSON structure → RU. Замер 2026-10-22
+  # (bench_tr): 3n 128с ×2, RU, JSON 4 ключа, ПОЛНЫЙ перенос чисел/термов (75/2000/BLEU→
+  # «оценки BLEU», power→мощность, variance→дисперсия). Та же модель = zero-reload после
+  # Call 2, сумма этапа 298с. Fallback e2b: 69с 1/1, полный перенос. Промпт: RU-system
+  # (урок зеркала языка) + термины EN сохранить.
+  translation:
+    primary: "google/gemma-3n-e4b"
+    fallback: ["google/gemma-4-e2b"]
+    max_context: 8000
+    temperature: 0.1
+    max_tokens: 3000
+    timeout: 300
+
+  # gaps / related-work (CLI): синтез по нескольким статьям — интерактивные, quality-first
+  deep_analysis:
+    primary: "google/gemma-4-26b-a4b-qat"
+    fallback: ["openai/gpt-oss-20b"]
+    max_context: 16000
+    temperature: 0.3
+    max_tokens: 3000
+    timeout: 900
+
+  # Call 4/4: critique. Замер 2026-10-21 (bench_er): 232с, 9/15 spec-термов (McNemar, Type-M/S, MDE,
+  # Delta-Laplace, BLEU) — лучшее качество И быстрее всех кандидатов. gpt-oss снят с primary:
+  # peg-native флейк ~50% БЕЗ связи с enable_thinking (опровергнуто замером — падает и без extra_body),
+  # ретраи пересэмплируют в тот же глитч формата. Ministral fallback: 611с, работает, конкретики меньше.
+  reasoning:
+    primary: "google/gemma-4-26b-a4b-qat"
+    fallback: ["mistralai/ministral-3-14b-reasoning", "openai/gpt-oss-20b"]
+    max_context: 16000
+    temperature: 0.4
+    max_tokens: 3000
+    timeout: 900
+
+  # Call 1/4: замер 2026-10-21: 268с, все 3 ключа, факты чистые, без thinking — компактнее 26b.
+  # 26b освободлена под reasoning (вариант 1 юзера 2026-10-21): перевес качества там больше
+  # (9/15 против 2/15), чем потеря богатства summary. lfm2 из fallback убрана: проза внутри JSON.
+  summary:
+    primary: "google/gemma-4-e4b"
+    fallback: ["google/gemma-4-26b-a4b-qat", "google/gemma-4-12b-qat"]
+    max_context: 16000
+    temperature: 0.5
+    max_tokens: 3000
+    timeout: 900
+
+  # ask (RAG-интерактив): скорость отклика важнее глубины. Замер 2026-10-22 (bench_cs): 76с
+  # (first 55с) — быстрейший чат из замеренных (×1.5 против e2b 116с), русский чистый (0.83),
+  # честные cite [citekey]. No-reasoning-модель (решение юзера 2026-10-22): класс thinking-проблем
+  # отсутствует как вид. e2b → fallback (бывший primary, 116с/690ток/5.9 tok/s). 12b в fallback:
+  # лучший текст (числа статьи в ответе: 2000/75%/1 BLEU), но 223с. mistral-7b отвергнут и
+  # удалён с диска юзером (галлюцинация «Multiple Rights and Wrongs Corpus», 0/12 в structure).
+  chat:
+    primary: "google/gemma-3n-e4b"
+    fallback: ["google/gemma-4-e2b", "google/gemma-3-12b"]
+    max_context: 16000
+    temperature: 0.6
+    timeout: 600
+
+  # Call 3/4: extraction. Замер 2026-10-22 (bench_se): 3n 177с холод / 35с ГОРЯЧАЯ (после Call 2/2b —
+  # та же модель в RAM), список богаче 9b (delta-laplace mixture, McNemar's test, WMT En-De, MNLI-m/mm),
+  # grounded 24/26 ×2 стабильно. Систематический мусор ImageNet ×2 — из few-shot-примера промпта
+  # → лечится grounded-постфильтром в obsidian_builder (класс few-shot-отравлений закрыт целиком:
+  # бил в замерах bert/dropout/imagenet/mrcp/mupdf). Мусор после фильтра = 0. 9b снята: 30/30 чисто,
+  # но ×8 медленнее горячей 3n (−250с/статья). e4b fallback: 200с, 19/19 чисто — фильтр не нужен,
+  # но survive-ет его тривиально. 12b: 22/25 + bert/dropout/layer-norm/imagenet — вне.
+  entity_extraction:
+    primary: "google/gemma-3n-e4b"
+    fallback: ["google/gemma-4-e4b"]
+    max_context: 8000
+    temperature: 0.2
+    timeout: 450
+
+  vision:
+    primary: "qwen/qwen3-vl-4b"              # юзер 2026-10-20: 4b вместо 8b — RAM 4 vs 9 ГБ, CPU-декод быстрее
+    fallback: ["qwen/qwen3-vl-8b"]           # качество-фолбэк
+    max_context: 4096
+    temperature: 0.3
+    timeout: 600
+
+  ocr:
+    primary: "allenai/olmocr-2-7b"
+    fallback: ["qwen/qwen3-vl-4b"]
+    max_context: 8000
+    temperature: 0.1
+    timeout: 900                           # VLM 7B на CPU: до 2–5 мин на страницу
+
+  embed:
+    primary: "text-embedding-bge-m3"        # НЕ МЕНЯТЬ
+    max_batch: 32
+
+  rerank:
+    primary: "liquid/lfm2.5-1.2b"           # интерактивный RAG: MoE 1.2B, мгновенный префилл (юзер 2026-10-20)
+    fallback: ["ibm/granite-4-h-tiny", "qwen/qwen3-4b-2507"]
+    max_context: 16000
+    temperature: 0.0
+    timeout: 300

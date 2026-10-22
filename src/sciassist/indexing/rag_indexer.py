@@ -56,6 +56,7 @@ class RAGIndexer:
         # cosine distance — values in [0,2], similarity = 1 - distance ∈ [-1,1]
         self._papers = db.get_or_create_collection("papers_full", metadata=_COSINE)
         self._notes  = db.get_or_create_collection("papers_notes",  metadata=_COSINE)
+        self._textbooks = db.get_or_create_collection("textbooks",   metadata=_COSINE)
 
         self._reg_path = cfg.project_root / "data" / "index_registry.json"
         self._reg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,11 +72,16 @@ class RAGIndexer:
         self._reg_path.write_text(json.dumps(self._reg, indent=2))
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
+        import time
+
         yaml_cfg = get_yaml_config()
         batch: int = yaml_cfg.get("model_router", {}).get("embed", {}).get("max_batch", 32)
+        total = (len(texts) + batch - 1) // batch
         out: list[list[float]] = []
         for i in range(0, len(texts), batch):
+            t0 = time.perf_counter()
             out.extend(await self._llm.embed(texts[i : i + batch], model=self._embed_model))
+            logger.info(f"embed: батч {i // batch + 1}/{total} ({len(texts[i : i + batch])} текстов) за {time.perf_counter() - t0:.0f}с")
         return out
 
     # ------------------------------------------------------------------
@@ -189,6 +195,61 @@ class RAGIndexer:
         self._save()
         return len(clean_chunks)
 
+    async def index_textbook(self, book_id: str, md_path: Path, *, force: bool = False) -> int:
+        reg_key = f"textbook:{book_id}"
+        md5 = self._md5(md_path)
+        if not force and self._reg.get(reg_key) == md5:
+            logger.debug(f"{book_id}: без изменений, пропуск")
+            return 0
+
+        try:
+            self._textbooks.delete(where={"citekey": book_id})
+        except Exception:
+            pass
+
+        yaml_cfg = get_yaml_config()
+        tc = yaml_cfg.get("chunking", {}).get("textbooks", {})
+        chunks = chunk_markdown(
+            md_path.read_text(encoding="utf-8"),
+            chunk_size=tc.get("chunk_size", 1600),
+            overlap=tc.get("chunk_overlap", 300),
+        )
+        if not chunks:
+            logger.warning(f"{book_id}: нет чанков (textbook)")
+            return 0
+
+        clean_chunks: list[tuple[str, object]] = []
+        for c in chunks:
+            cleaned = _clean_chunk(c.text)
+            if _is_junk(cleaned):
+                continue
+            clean_chunks.append((cleaned, c))
+
+        if not clean_chunks:
+            logger.warning(f"{book_id}: после чистки не осталось чанков (textbook)")
+            return 0
+
+        texts = [t for t, _ in clean_chunks]
+        embeddings = await self._embed(texts)
+
+        # citekey=book_id: дедуп/источники/контекст ask() работают без правок
+        self._textbooks.add(
+            ids=[f"{book_id}::t::{i}" for i in range(len(clean_chunks))],
+            documents=texts,
+            embeddings=embeddings,
+            metadatas=[
+                {"citekey": book_id, "section": c.section, "idx": c.chunk_index}
+                for _, c in clean_chunks
+            ],
+        )
+        logger.info(
+            f"{book_id}: textbooks ← {len(clean_chunks)} чанков "
+            f"(отброшено {len(chunks) - len(clean_chunks)})"
+        )
+        self._reg[reg_key] = md5
+        self._save()
+        return len(clean_chunks)
+
     async def query(
         self,
         question: str,
@@ -197,7 +258,7 @@ class RAGIndexer:
         where: dict | None = None,
     ) -> dict:
         vec = await self._llm.embed([question], model=self._embed_model)
-        col = self._papers if collection == "papers_full" else self._notes
+        col = self._col(collection)
         n = min(top_k, col.count() or 1)
         kwargs: dict = {"query_embeddings": [vec[0]], "n_results": n}
         if where:
@@ -218,9 +279,29 @@ class RAGIndexer:
         return {
             "papers_full_chunks": self._papers.count(),
             "papers_notes_chunks": self._notes.count(),
+            "textbooks_chunks": self._textbooks.count(),
             "indexed_papers": len([k for k in self._reg if k.startswith("paper:")]),
+            "indexed_textbooks": len([k for k in self._reg if k.startswith("textbook:")]),
             "embed_model": self._embed_model,
         }
+
+    def _col(self, name: str):
+        """Вернуть Chroma-коллекцию по имени (papers_full | papers_notes | textbooks)."""
+        return {
+            "papers_full": self._papers,
+            "papers_notes": self._notes,
+        }.get(name, self._textbooks)
+
+    def list_textbooks(self) -> list[dict]:
+        out: list[dict] = []
+        for k in self._reg:
+            if not k.startswith("textbook:"):
+                continue
+            book_id = k.split(":", 1)[1]
+            data = self._textbooks.get(where={"citekey": book_id}, include=["metadatas"])
+            out.append({"book_id": book_id, "chunks": len(data.get("ids") or [])})
+        return out
+
     def get_collection(self, name: str):
         """Вернуть Chroma-коллекцию по имени (для BM25)."""
-        return self._papers if name == "papers_full" else self._notes
+        return self._col(name)

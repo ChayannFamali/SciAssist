@@ -103,7 +103,11 @@ class HTTPBackend:
     """Full read/write via pyzotero local=True (Zotero must be running)."""
 
     def __init__(self) -> None:
-        self._zot = pyzotero_lib.Zotero(library_id=0, library_type="user", local=True)
+        key = get_settings().zotero_local_api_key
+        self._zot = pyzotero_lib.Zotero(
+            library_id=0, library_type="user", local=True,
+            local_api_key=key or None,
+        )
         self._url = get_settings().zotero_local_url
 
     def ping(self) -> bool:
@@ -153,11 +157,24 @@ class HTTPBackend:
             self._zot.update_item(item)
 
     def move_to_collection(self, key: str, name: str) -> None:
+        """Перемещает item в целевую SciAssist-коллекцию: добавляет в целевую
+        и убирает из прочих SciAssist Queue/Processed (addto_collection лишь
+        добавляет — item оставался в обеих коллекциях; geiping/miller/dror
+        2026-10-22 пришлось чистить вручную)."""
         col_key = self._collection_key(name)
         if col_key is None:
             logger.warning(f"Collection '{name}' not found")
             return
-        self._zot.addto_collection(col_key, self._zot.item(key))
+        item = self._zot.item(key)
+        cols = list(item["data"].get("collections", []))
+        if col_key not in cols:
+            cols.append(col_key)
+        for other in ("SciAssist Queue", "SciAssist Processed"):
+            other_key = self._collection_key(other)
+            if other_key and other_key != col_key and other_key in cols:
+                cols.remove(other_key)
+        item["data"]["collections"] = cols
+        self._zot.update_item(item)
 
     def create_collection(self, name: str) -> None:
         self._zot.create_collections([{"name": name, "parentCollection": False}])

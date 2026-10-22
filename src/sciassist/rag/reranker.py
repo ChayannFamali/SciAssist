@@ -22,7 +22,7 @@ _SNIPPET = 500
 
 def _parse_order(text: str, n: int) -> list[int]:
     """Извлекает массив индексов из ответа LLM. 1-based → 0-based."""
-    m = re.search(r"$$[\d,\s]*$$", text)
+    m = re.search(r"\[[\d,\s]*\]", text)
     if not m:
         return list(range(n))
     try:

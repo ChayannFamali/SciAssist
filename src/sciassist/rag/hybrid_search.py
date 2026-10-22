@@ -4,7 +4,7 @@ import re
 from loguru import logger
 from rank_bm25 import BM25Okapi
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9]+")
 
 
 def _tokenize(text: str) -> list[str]:

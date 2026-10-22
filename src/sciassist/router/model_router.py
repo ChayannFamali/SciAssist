@@ -20,7 +20,10 @@ class ModelRouter:
     """Reads model_router.yaml and selects the best model for a task."""
 
     def __init__(self) -> None:
-        path = get_settings().project_root / "configs" / "model_router.yaml"
+        settings = get_settings()
+        path = settings.model_router or settings.project_root / "configs" / "model_router.yaml"
+        if not path.is_absolute():
+            path = settings.project_root / path
         with open(path, encoding="utf-8") as f:
             self._rules: dict = yaml.safe_load(f).get("rules", {})
 

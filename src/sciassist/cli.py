@@ -147,6 +147,89 @@ async def _note(citekey: str, force: bool) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# knowledge (база знаний: учебники → textbooks, без LLM-анализа)
+# ─────────────────────────────────────────────────────────────────────────────
+knowledge_app = typer.Typer(help="База знаний: учебники и документы (поиск без LLM-анализа).")
+app.add_typer(knowledge_app, name="knowledge")
+
+
+@knowledge_app.command("add")
+def knowledge_add(
+    pdf: Annotated[Path, typer.Argument(help="PDF учебника/документа")],
+    ocr: Annotated[bool, typer.Option("--ocr", help="Разрешить Olmocr для сканов (медленно на CPU)")] = False,
+    force: Annotated[bool, typer.Option("--force", help="Переиндексировать принудительно")] = False,
+) -> None:
+    """Add PDF → markdown → chunks → bge-m3 → textbooks. Без LLM-анализа."""
+    asyncio.run(_knowledge_add(pdf, ocr, force))
+
+
+async def _knowledge_add(pdf: Path, ocr: bool, force: bool) -> None:
+    import re as _re
+    import pymupdf
+    from sciassist.utils.logging import setup_logging
+    from sciassist.preprocessing.pdf_to_markdown import process_pdf
+    from sciassist.indexing.rag_indexer import RAGIndexer
+    setup_logging()
+
+    if not pdf.exists():
+        console.print(f"[red]❌ Файл не найден: {pdf}[/red]")
+        raise typer.Exit(1)
+
+    book_id = _re.sub(r"[^0-9a-zа-яё-]+", "-", pdf.stem.lower()).strip("-")
+
+    # Предохранитель: скан без --ocr = часы Olmocr на CPU
+    with pymupdf.open(str(pdf)) as doc:
+        n_probe = min(10, doc.page_count)
+        avg_chars = sum(len(doc[i].get_text()) for i in range(n_probe)) / max(n_probe, 1)
+    if avg_chars < 100 and not ocr:
+        console.print(
+            f"[red]❌ Похоже на скан (~{avg_chars:.0f} симв/стр): Olmocr на CPU — часы. "
+            f"Передай --ocr, если осознанно хочешь OCR.[/red]"
+        )
+        raise typer.Exit(1)
+
+    console.print(f"[cyan]→ Конвертация (PyMuPDF, без LLM): {book_id}…[/cyan]")
+    md_path = await process_pdf(pdf, book_id, {"title": book_id})
+    console.print(f"[green]✓ Markdown:[/green] {md_path}")
+
+    console.print("[cyan]→ Индексация (bge-m3, без анализа)…[/cyan]")
+    indexer = RAGIndexer()
+    n = await indexer.index_textbook(book_id, md_path, force=force)
+    console.print(f"[green]✓ {n} чанков → textbooks[/green]")
+
+
+@knowledge_app.command("list")
+def knowledge_list() -> None:
+    """Учебники в базе знаний."""
+    from sciassist.indexing.rag_indexer import RAGIndexer
+    books = RAGIndexer().list_textbooks()
+    if not books:
+        console.print("[yellow]База знаний пуста: sciassist knowledge add <pdf>[/yellow]")
+        return
+    table = Table(title="📚 База знаний (textbooks)")
+    table.add_column("book_id")
+    table.add_column("чанков", justify="right")
+    for b in books:
+        table.add_row(b["book_id"], str(b["chunks"]))
+    console.print(table)
+
+
+@knowledge_app.command("stats")
+def knowledge_stats() -> None:
+    """Статистика индекса RAG по коллекциям."""
+    from sciassist.indexing.rag_indexer import RAGIndexer
+    st = RAGIndexer().stats()
+    table = Table(title="RAG индекс")
+    table.add_column("коллекция")
+    table.add_column("чанков", justify="right")
+    table.add_row("papers_full", str(st["papers_full_chunks"]))
+    table.add_row("papers_notes", str(st["papers_notes_chunks"]))
+    table.add_row("textbooks", str(st["textbooks_chunks"]))
+    console.print(table)
+    console.print(f"[dim]embed: {st['embed_model']}[/dim]")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # search
 # ─────────────────────────────────────────────────────────────────────────────
 @app.command()
@@ -197,15 +280,17 @@ def ask(
     rerank: Annotated[bool, typer.Option("--rerank/--no-rerank")] = True,
     hybrid: Annotated[bool, typer.Option("--hybrid/--no-hybrid")] = True,
     col: Annotated[str, typer.Option("--col", "-c",
-        help="papers_full | papers_notes | both")] = "papers_full",
+        help="papers_full | papers_notes | textbooks | both | all")] = "papers_full",
     hyde: Annotated[bool, typer.Option("--hyde/--no-hyde",   # ← добавлено
-        help="HyDE: генерировать гипотетический ответ для эмбеддинга")] = False,
+        help="HyDE: генерировать гипотетический ответ для эмбеддинга")] = True,
+    stream: Annotated[bool, typer.Option("--stream/--no-stream",
+        help="Печатать ответ по мере генерации")] = True,
 ) -> None:
     """Ask a question — RAG answer with citations."""
-    asyncio.run(_ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde))  # ← добавлен hyde
+    asyncio.run(_ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde, stream))  # ← добавлен hyde
 
 
-async def _ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde) -> None:  # ← добавлен hyde
+async def _ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyde, stream) -> None:  # ← добавлен hyde
     from sciassist.utils.logging import setup_logging
     from sciassist.rag.query_engine import QueryEngine
     setup_logging()
@@ -216,13 +301,18 @@ async def _ask(question, top, min_score, max_per_paper, rerank, hybrid, col, hyd
         f"col={col}, hyde={'on' if hyde else 'off'})…[/dim]"  # ← добавлен hyde
     )
     engine = QueryEngine()
+    on_token = None
+    if stream:
+        console.print("[bold cyan]Ответ[/bold cyan] (поток):\n")
+        on_token = lambda t: console.print(t, end="", soft_wrap=True)
     result = await engine.ask(
         question, top_k=top, min_score=min_score,
         max_per_paper=max_per_paper, rerank=rerank, hybrid=hybrid,
-        collection=col, hyde=hyde,                             # ← добавлен hyde
+        collection=col, hyde=hyde, on_token=on_token,
     )
     console.print()
-    console.print(Panel(result.answer, title="[bold cyan]Ответ[/bold cyan]"))
+    if not stream:
+        console.print(Panel(result.answer, title="[bold cyan]Ответ[/bold cyan]"))
 
     t = Table("Citekey", "Section", "Score", title="Источники")
     for s in result.sources:

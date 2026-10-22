@@ -4,6 +4,25 @@
 # Имена проверены по GET http://localhost:1234/v1/models
 
 rules:
+  # Call 2/4 (extract_structure) — extraction-задача; на ПК зеркалит deep_analysis
+  structure:
+    primary: "qwen/qwen3.6-35b-a3b"
+    fallback: ["mistralai/magistral-small-2509", "qwen/qwen3.5-9b"]
+    max_context: 32000
+    temperature: 0.3
+    max_tokens: 6000
+    timeout: 600
+
+  # Call 2b (translate_structure) — ноут: EN→RU; на ПК зеркалит deep_analysis
+  # (роль должна существовать в yaml — иначе ПК упадёт на select("translation"))
+  translation:
+    primary: "qwen/qwen3.6-35b-a3b"
+    fallback: ["mistralai/magistral-small-2509"]
+    max_context: 8000
+    temperature: 0.1
+    max_tokens: 6000
+    timeout: 300
+
   deep_analysis:
     primary: "qwen/qwen3.6-35b-a3b"
     fallback: ["mistralai/magistral-small-2509", "qwen/qwen3.5-9b"]
