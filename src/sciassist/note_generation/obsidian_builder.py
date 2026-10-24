@@ -232,6 +232,30 @@ async def _related_papers(llm, structure: dict, citekey: str, exclude: str) -> l
         logger.warning(f"{citekey}: related-тег не построен: {e}")
         return []
 
+async def _library_consult(entities: dict, title: str, citekey: str, top_k: int = 3) -> str:
+    """RAG-консульт критики: чужие чанки по методам/концепциям статьи.
+    Без LLM-вызовов (hyde/expand/rerank/generate=False) — только embed+BM25.
+    Пустая строка = библиотеки нет/только сама статья → блок не рендерится."""
+    methods  = [m for m in entities.get("methods", []) if m][:5]
+    concepts = [c for c in entities.get("concepts", []) if c][:5]
+    if not methods and not concepts:
+        return ""
+    query = f"{title}. Методы: {', '.join(methods)}. Концепции: {', '.join(concepts)}"
+    try:
+        from sciassist.rag.query_engine import QueryEngine   # лениво: rag-слой тяжёлый
+        ans = await QueryEngine().ask(
+            query, top_k=top_k, collection="papers_full",
+            hyde=False, expand_en=False, rerank=False,
+            generate=False, exclude_citekey=citekey,
+        )
+    except Exception as e:
+        logger.warning(f"{citekey}: library-консульт упал: {e}")
+        return ""
+    if not ans.sources:
+        return ""
+    return "\n\n".join(f"[{s.citekey}] ({s.section}): {s.text[:600]}" for s in ans.sources)
+
+
 def _truncate(text: str, max_words: int, reserve: int = 0) -> str:
     """Truncate to max_words. reserve ignored (kept for compat)."""
     words = text.split()
@@ -294,6 +318,94 @@ def _ensure_stub(folder: Path, name: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# MapReduce: длинная статья > _NOTE_MAX_WORDS слов → окна + слияние
+# ---------------------------------------------------------------------------
+def _split_windows(text: str, max_words: int = _NOTE_MAX_WORDS) -> list[str]:
+    """Абзаце-выровненные окна ≤ max_words; гигантский абзац режется по словам.
+    Короткий текст → одно окно = полный текст (поведение прежнего одиночного вызова)."""
+    windows: list[str] = []
+    cur: list[str] = []
+    cur_words = 0
+    for para in text.split("\n\n"):
+        if not para.strip():
+            continue
+        w = len(para.split())
+        if w > max_words:                      # один абзац длиннее окна
+            if cur:
+                windows.append("\n\n".join(cur))
+                cur, cur_words = [], 0
+            words = para.split()
+            for i in range(0, len(words), max_words):
+                windows.append(" ".join(words[i:i + max_words]))
+            continue
+        if cur_words + w > max_words and cur:
+            windows.append("\n\n".join(cur))
+            cur, cur_words = [], 0
+        cur.append(para)
+        cur_words += w
+    if cur:
+        windows.append("\n\n".join(cur))
+    return windows
+
+
+def _concat_partials(partials: list[dict]) -> dict:
+    """Программное слияние частичных JSON: списки — concat+dedup, строки — склейка."""
+    out: dict = {}
+    for p in partials:
+        for k, v in p.items():
+            if isinstance(v, list):
+                merged = out.setdefault(k, [])
+                merged.extend(x for x in v if x and x not in merged)
+            elif isinstance(v, str):
+                out[k] = f"{out[k]} {v}".strip() if k in out and out.get(k) else v
+    return out
+
+
+async def _call_spec(llm: LMStudioClient, spec, prompt_name: str, **fields) -> dict:
+    """Один extraction-вызов роли; **fields — переменные шаблона промпта."""
+    raw = await llm.chat(
+        messages=_make_messages(_render_prompt(_load_prompt(prompt_name), **fields)),
+        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,
+        max_tokens=spec.max_tokens,
+    )
+    return _parse_json(raw)
+
+
+async def _mapreduce(llm: LMStudioClient, spec, citekey: str, prompt_name: str,
+                      full_text: str, merge_prompt: str | None = None) -> dict:
+    """Окненный extraction: 1 окно ≤ _NOTE_MAX_WORDS слов.
+    merge_prompt=None → программное слияние (списочные схемы, entity);
+    иначе → LLM-reduce (проза: summary/structure), фолбэк на конкатенацию."""
+    windows = _split_windows(full_text)
+    if len(windows) <= 1:
+        return await _call_spec(llm, spec, prompt_name, paper_text=full_text) or {}
+    logger.info(f"{citekey}: MapReduce {prompt_name}: {len(windows)} окон")
+    partials: list[dict] = []
+    for i, w in enumerate(windows, 1):
+        logger.info(f"{citekey}: окно {i}/{len(windows)} ({len(w.split())} слов)")
+        p = await _call_spec(
+            llm, spec, prompt_name,
+            paper_text=f"[Фрагмент {i}/{len(windows)} статьи — не вся статья]\n\n{w}",
+        )
+        if p:
+            partials.append(p)
+    if not partials:
+        return {}
+    if len(partials) == 1:
+        return partials[0]
+    if merge_prompt is None:
+        return _concat_partials(partials)
+    merged = await _call_spec(
+        llm, spec, merge_prompt,
+        partials_json=json.dumps(partials, ensure_ascii=False),
+    )
+    if merged:
+        return merged
+    logger.warning(f"{citekey}: merge {prompt_name} не распарсен — конкатенация частичных")
+    return _concat_partials(partials)
+
+
 async def build_note(citekey: str, item: ZoteroItem, force: bool = False) -> Path:
     """
     Generate Obsidian note for a paper.
@@ -330,14 +442,8 @@ async def build_note(citekey: str, item: ZoteroItem, force: bool = False) -> Pat
     # ── LLM Call 1: Summary ──────────────────────────────────────────
     logger.info(f"{citekey}: [1/4] summary…")
     spec = router.select("summary")
-    raw = await llm.chat(
-        messages=_make_messages(_render_prompt(
-            _load_prompt("summary"),
-            paper_text=_truncate(full_text, _NOTE_MAX_WORDS),
-        )),
-        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,max_tokens=spec.max_tokens,
-    )
-    summary = _parse_json(raw)
+    summary = await _mapreduce(llm, spec, citekey, "summary", full_text,
+                                merge_prompt="summary_merge")
     for _k in ("tldr", "problem", "limitations"):
         if summary.get(_k):
             summary[_k] = _assert_numbers_grounded(str(summary[_k]), full_text, citekey, f"summary/{_k}")
@@ -346,14 +452,8 @@ async def build_note(citekey: str, item: ZoteroItem, force: bool = False) -> Pat
     logger.info(f"{citekey}: [2/4] extract_structure…")
     # extraction-задача; deep_analysis остаётся для синтеза (gaps/related-work)
     spec = router.select("structure")
-    raw = await llm.chat(
-        messages=_make_messages(_render_prompt(
-            _load_prompt("extract_structure"),
-            paper_text=_truncate(full_text, _NOTE_MAX_WORDS),
-        )),
-        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,max_tokens=spec.max_tokens,
-    )
-    structure = _parse_json(raw)
+    structure = await _mapreduce(llm, spec, citekey, "extract_structure", full_text,
+                                  merge_prompt="structure_merge")
 
     # ── LLM Call 2b: Structure → RU (gemma-3n отдаёт EN-JSON: зеркалит system+статью) ──
     if structure:
@@ -387,7 +487,8 @@ async def build_note(citekey: str, item: ZoteroItem, force: bool = False) -> Pat
         _latin_terms_report(str(structure.get(_k, "")), full_text, citekey, f"structure/{_k}")
     # ось 3: наблюдаемость потерь чисел в extraction
     if structure:
-        paper_nums = _numbers_in(_truncate(full_text, _NOTE_MAX_WORDS))
+        # ground-набор — из ПОЛНОГО текста: усечённый маркировал бы числа хвоста ⚠ ложно
+        paper_nums = _numbers_in(full_text)
         got = _numbers_in(json.dumps(structure, ensure_ascii=False))
         logger.info(f"{citekey}: числа: extraction захватил {len(got)} из {len(paper_nums)} "
                     f"числовых токенов входа")
@@ -395,23 +496,27 @@ async def build_note(citekey: str, item: ZoteroItem, force: bool = False) -> Pat
     # ── LLM Call 3: Entities ─────────────────────────────────────────
     logger.info(f"{citekey}: [3/4] entity_extraction…")
     spec = router.select("entity_extraction")
-    raw = await llm.chat(
-        messages=_make_messages(_render_prompt(
-            _load_prompt("entity_extraction"),
-            paper_text=_truncate(full_text, _NOTE_MAX_WORDS),
-        )),
-        model=spec.name, temperature=spec.temperature, timeout=spec.timeout,max_tokens=spec.max_tokens,
-    )
-    entities = _parse_json(raw)
+    # слияние программное (списки), LLM-reduce не нужен
+    entities = await _mapreduce(llm, spec, citekey, "entity_extraction", full_text)
     entities = _filter_grounded(entities, full_text, citekey)
 
     # ── LLM Call 4: Critique ─────────────────────────────────────────
     logger.info(f"{citekey}: [4/4] critique…")
     spec = router.select("reasoning")
+    # RAG-консульт: как ЧУЖИЕ работы смотрят на метод/проблему — до Call 4,
+    # без LLM-трат. Пусто → блок не рендерится, поведение прежнее.
+    lib = await _library_consult(entities, item.title, citekey)
+    library_block = (
+        "## Сведения из библиотеки (НЕ статья — чужие работы)\n"
+        "Контекст для оценки (missing_experiments, overall), опора на блок — с указанием [citekey].\n"
+        "Числа и факты блока — НЕ факты статьи; quote-поля strengths/weaknesses — ТОЛЬКО из текста статьи выше.\n\n"
+        f"{lib}"
+    ) if lib else ""
     raw = await llm.chat(
         messages=_make_messages(_render_prompt(
             _load_prompt("critique"),
             paper_text=_truncate(full_text, _NOTE_MAX_WORDS),
+            library_block=library_block,
         )),
         model=spec.name, temperature=spec.temperature, timeout=spec.timeout,max_tokens=spec.max_tokens,
     )

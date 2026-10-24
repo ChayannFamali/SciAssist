@@ -170,6 +170,7 @@ class QueryEngine:
         pool_k: int = 10,                                       # пул кандидатов на rerank
         generate: bool = True,                                 # False = только retrieval (eval)
         on_token: "callable | None" = None,                   # стрим ответа в CLI
+        exclude_citekey: str | None = None,                   # консульт критики: убрать свои чанки
     ) -> RAGAnswer:
         # 1. dense: HyDE-гипотеза; sparse: вопрос + EN-перевод (разрыв языков
         #    RU-вопрос / EN-корпус; BM25 гипотезами не кормим — исходный вопрос)
@@ -205,6 +206,14 @@ class QueryEngine:
                 answer="Не могу подтвердить на основе библиотеки — индекс пуст.",
                 sources=[], model="n/a",
             )
+
+        # 2.5. Исключение собственных чанков (консульт критики: статья не
+        #      консультирует сама себя) — до порога/реранка, чтобы не ели бюджет
+        if exclude_citekey:
+            n0 = len(candidates)
+            candidates = [c for c in candidates if c[1].get("citekey") != exclude_citekey]
+            if n0 - len(candidates):
+                logger.info(f"exclude_citekey={exclude_citekey}: убрано {n0 - len(candidates)} своих чанков")
 
         # 3. Порог (косинус) + денилист секций.
         #    BM25-хиты (in_sparse=True) обходят косинусный порог.
